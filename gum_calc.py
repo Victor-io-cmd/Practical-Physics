@@ -502,7 +502,7 @@ def generate_bilan(
         formula_sympy = formula_sympy.subs(sp.Symbol(n), sp.Symbol(sym_map[n]))
     formula_latex = sp.latex(formula_sympy)
 
-    lines.append(rf"Le mesurande ${measurand_symbol}$ est lié aux grandeurs d'entrée par le modèle :")
+    lines.append(rf"\noindent Le mesurande ${measurand_symbol}$ est lié aux grandeurs d'entrée par le modèle :")
     lines.append(r"\[")
     lines.append(rf"    {measurand_symbol} = {formula_latex}")
     lines.append(r"\]")
@@ -514,7 +514,7 @@ def generate_bilan(
         defs.append(rf"${sym_map[n]} = {_si(val, unit, sig=global_sig_figs)}$")
     nom_val = res["result"]
     lines.append(
-        r"avec " + " et ".join(defs)
+        r"\noindent avec " + " et ".join(defs)
         + rf", ce qui donne la valeur nominale "
         rf"${measurand_symbol}_{{\mathrm{{nom}}}} = {_si(nom_val, measurand_unit, sig=global_sig_figs)}$."
     )
@@ -529,14 +529,14 @@ def generate_bilan(
 
         if inp["type"] == "exact":
             lines.append(
-                rf"La grandeur ${sym}$ est une constante exacte déterminée par définition. "
+                rf"\noindent La grandeur ${sym}$ est une constante exacte déterminée par définition. "
                 rf"Son incertitude-type est nulle : $u({sym}) = 0$."
             )
         elif inp["type"] == "A":
             N_mes = inp["N"]
             s     = inp["s"]
             lines.append(
-                rf"La répétition de $N = {N_mes}$ mesures sur ${sym}$ fournit "
+                rf"\noindent La répétition de $N = {N_mes}$ mesures sur ${sym}$ fournit "
                 rf"une incertitude de type~A :"
             )
             lines.append(r"\[")
@@ -552,7 +552,7 @@ def generate_bilan(
                 a     = inp.get("a", u_val * math.sqrt(3))
                 delta = a * 2
                 lines.append(
-                    rf"La grandeur ${sym}$ est issue d'une lecture unique sur un instrument "
+                    rf"\noindent La grandeur ${sym}$ est issue d'une lecture unique sur un instrument "
                     rf"de résolution $\delta = {_si(delta, unit, sig=global_sig_figs)}$, "
                     rf"ce qui conduit à une incertitude de type~B :"
                 )
@@ -565,7 +565,7 @@ def generate_bilan(
                 lines.append(r"\]")
             else:
                 lines.append(
-                    rf"L'incertitude-type de type~B sur ${sym}$ est estimée directement à :"
+                    rf"\noindent L'incertitude-type de type~B sur ${sym}$ est estimée directement à :"
                 )
                 lines.append(r"\[")
                 lines.append(rf"    u_B({sym}) = {_si(u_val, unit, sig=global_sig_figs)}")
@@ -573,7 +573,7 @@ def generate_bilan(
         lines.append("")
 
     lines.append(r"\newline")
-    lines.append(r"Les coefficients de sensibilité, évalués aux valeurs nominales, sont :")
+    lines.append(r"\noindent Les coefficients de sensibilité, évalués aux valeurs nominales, sont :")
     lines.append(r"\[")
     ci_terms = []
     for n in variable_names:
@@ -592,7 +592,7 @@ def generate_bilan(
     lines.append("")
 
     uc = res["uc"]
-    lines.append(r"La propagation des incertitudes pour des grandeurs indépendantes donne :")
+    lines.append(r"\noindent La propagation des incertitudes pour des grandeurs indépendantes donne :")
     lines.append(r"\[")
     inner_terms = []
     for n in variable_names:
@@ -641,7 +641,7 @@ def generate_bilan(
                 rf"($\nu_{{{sym_map[n]}}} = {N_mes - 1}$)"
             )
         lines.append(
-            "La source " + " et ".join(a_descriptions)
+            "\noindent La source " + " et ".join(a_descriptions)
             + r". On détermine le facteur d'élargissement par Welch-Satterthwaite :"
         )
         lines.append(r"\[")
@@ -651,12 +651,12 @@ def generate_bilan(
         )
         lines.append(r"\]")
         lines.append(
-            rf"Pour $\nu_{{\mathrm{{eff}}}} = {nu_eff:.0f}$ (95\,\%), "
+            rf"\noindent Pour $\nu_{{\mathrm{{eff}}}} = {nu_eff:.0f}$ (95\,\%), "
             rf"la table de Student donne $k = {k:.2f}$."
         )
     else:
         lines.append(
-            rf"Toutes les composantes significatives sont de type~B ou historiques ; "
+            rf"\noindent Toutes les composantes significatives sont de type~B ; "
             rf"on retient $k = {k:.2f}$ (95\,\%)."
         )
     lines.append("")
@@ -672,7 +672,7 @@ def generate_bilan(
     lines.append("")
 
     lines.append(r"\newline")
-    lines.append(r"Le budget d'incertitudes :")
+    lines.append(r"\noindent Le budget d'incertitudes :")
     lines.append(r"\[")
     budget_terms = []
     for n in variable_names:
@@ -692,16 +692,28 @@ def generate_bilan(
     if non_exact_budget:
         dominant = max(non_exact_budget, key=non_exact_budget.get)
         lines.append(
-            rf"La mesure de ${sym_map[dominant]}$ contribue à "
+            rf"\noindent La mesure de ${sym_map[dominant]}$ contribue à "
             rf"{non_exact_budget[dominant]:.0f}\,\% de la variance composée."
         )
     lines.append("")
 
-    lines.append(r"Le résultat final s'écrit :")
+    lines.append(r"\noindent Le résultat final s'écrit :")
     lines.append(r"\[")
+    # Formater la valeur nominale arrondie : \num{} sans unité (portée par l'incertitude)
+    val_str = _si(res['result_rounded'], "", sig=global_sig_figs).replace(r"\SI{", "").replace("}{}", "")
+    # Utiliser \num{} si la valeur est simple, sinon construire manuellement
+    mag_val = math.floor(math.log10(abs(res['result_rounded']))) if res['result_rounded'] != 0 else 0
+    if -2 <= mag_val <= 3:
+        decimals_val = max(0, global_sig_figs - 1 - mag_val)
+        num_str = rf"\num{{{res['result_rounded']:.{decimals_val}f}}}"
+    else:
+        mantissa = abs(res['result_rounded']) / (10 ** mag_val)
+        mantissa = round(mantissa, global_sig_figs - 1)
+        sign = "-" if res['result_rounded'] < 0 else ""
+        num_str = rf"\num{{{sign}{mantissa:.{global_sig_figs-1}f}e{mag_val}}}"
     lines.append(
         rf"    \boxed{{{measurand_symbol} = "
-        rf"{_si(res['result_rounded'], measurand_unit, sig=global_sig_figs)} \pm "
+        rf"{num_str} \pm "
         rf"{_si(res['U_rounded'], measurand_unit, sig=2)}}}"
     )
     lines.append(r"\]")
