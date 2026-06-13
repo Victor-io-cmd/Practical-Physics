@@ -61,7 +61,7 @@ sys.path.insert(0, r"C:\chemin\vers\gum-calc")
 
 ## Fonctionnement global
 
-Le workflow est identique pour chaque TP :
+Le workflow suit la logique suivante :
 
 1. On déclare les incertitudes de chaque grandeur d'entrée
 2. On calcule le mesurande avec `full_gum_analysis`
@@ -147,7 +147,7 @@ u_x = uncertainty_type_B_relative(u_standard=valeur)
 | `u_standard` | `float` | Incertitude-type u (pas l'incertitude élargie U = k·u) |
 | `relative_knowledge` | `float` ou `None` | Connaissance relative sur u — si fourni, estime les degrés de liberté par ν = 1/(2r²) |
 
-> ⚠️ En chaîne de mesurandes, toujours passer `res["uc"]`, jamais `res["U"]`. Passer U = k·u_c doublerait le facteur k — c'est une erreur GUM.
+> En chaîne de mesurandes, toujours passer `res["uc"]`, jamais `res["U"]`. Passer U = k·u_c doublerait le facteur k — c'est une erreur GUM.
 
 ---
 
@@ -236,13 +236,11 @@ Les unités suivent la syntaxe du package siunitx : `r"\ohm"`, `r"\volt"`, `r"\a
 
 ## Étape 4 — Assembler l'annexe LaTeX
 
-`generate_annexe` prend la liste de tous les bilans dans l'ordre du compte rendu et produit la section LaTeX complète, prête à être copiée dans Overleaf.
+`generate_annexe` prend la liste de tous les bilans dans l'ordre du compte rendu et produit la section LaTeX complète.
 
 ```python
 print(generate_annexe([bilan_1, bilan_2, ...]))
 ```
-
-> À appeler **une seule fois**, en toute fin de notebook, avec tous les bilans dans l'ordre.
 
 ---
 
@@ -315,15 +313,5 @@ res_Y = full_gum_analysis(...)
 ```
 
 > Ne jamais passer `res_X["U"]` — ce serait appliquer k deux fois.
-
----
-
-## Règles d'usage importantes
-
-**Les noms de variables doivent être identiques** dans `formula_str`, `variable_names`, `nominal_values` et `uncertainty_inputs`. Toute incohérence provoque une erreur SymPy.
-
-**Ne jamais passer `res["U"]` en chaîne.** Toujours `res["uc"]` via `uncertainty_type_B_relative`. U = k·u_c — doubler k est une erreur GUM.
-
-**Un seul `generate_annexe` par notebook**, en toute fin, avec tous les bilans dans l'ordre du compte rendu.
 
 ---
