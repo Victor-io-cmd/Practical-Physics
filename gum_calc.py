@@ -417,6 +417,29 @@ def _sci(value: float, sig: int = 2) -> str:
     return rf"{sign}{mantissa_str} \times 10^{{{mag}}}"
 
 
+def _num(value: float, sig: int = 3) -> str:
+    """
+    Formate value sans unité, pour les termes intermédiaires des calculs
+    (numérateurs, dénominateurs, termes sous une racine, etc.).
+
+    Même convention de seuils que _si/_sci : notation décimale standard
+    pour un ordre de grandeur dans [-2, 3], notation scientifique sinon
+    (compatible \\num{} de siunitx).
+    """
+    if value == 0:
+        return r"\num{0}"
+    sign = "-" if value < 0 else ""
+    mag  = math.floor(math.log10(abs(value)))
+    if -2 <= mag <= 3:
+        decimals = max(0, sig - 1 - mag)
+        val_str  = f"{value:.{decimals}f}"
+    else:
+        mantissa = abs(value) / (10 ** mag)
+        mantissa = round(mantissa, sig - 1)
+        val_str  = f"{sign}{mantissa:.{sig-1}f}e{mag}"
+    return rf"\num{{{val_str}}}"
+
+
 def _si(value: float, unit: str, sig: int = 3) -> str:
     """
     Formate value avec son unité pour le package siunitx : \\SI{val}{unit}.
@@ -513,8 +536,12 @@ def generate_bilan(
         val  = nominal_values[n]
         defs.append(rf"${sym_map[n]} = {_si(val, unit, sig=global_sig_figs)}$")
     nom_val = res["result"]
+    if len(defs) > 1:
+        defs_str = ", ".join(defs[:-1]) + " et " + defs[-1]
+    else:
+        defs_str = defs[0]
     lines.append(
-        r"\noindent avec " + " et ".join(defs)
+        r"\noindent avec " + defs_str
         + rf", ce qui donne la valeur nominale "
         rf"${measurand_symbol}_{{\mathrm{{nom}}}} = {_si(nom_val, measurand_unit, sig=global_sig_figs)}$."
     )
@@ -542,7 +569,7 @@ def generate_bilan(
             lines.append(r"\[")
             lines.append(
                 rf"    u_A(\bar{{{sym}}}) = \frac{{s_{{{sym}}}}}{{\sqrt{{{N_mes}}}}}"
-                rf" = \frac{{{_si(s, unit, sig=global_sig_figs)}}}{{\sqrt{{{N_mes}}}}}"
+                rf" = \frac{{{_num(s, sig=global_sig_figs)}}}{{\sqrt{{{N_mes}}}}}"
                 rf" = {_si(u_val, unit, sig=global_sig_figs)}"
             )
             lines.append(r"\]")
@@ -559,7 +586,7 @@ def generate_bilan(
                 lines.append(r"\[")
                 lines.append(
                     rf"    u_B({sym}) = \frac{{\delta/2}}{{\sqrt{{3}}}}"
-                    rf" = \frac{{{_si(a, unit, sig=global_sig_figs)}}}{{\sqrt{{3}}}}"
+                    rf" = \frac{{{_num(a, sig=global_sig_figs)}}}{{\sqrt{{3}}}}"
                     rf" = {_si(u_val, unit, sig=global_sig_figs)}"
                 )
                 lines.append(r"\]")
@@ -574,7 +601,6 @@ def generate_bilan(
 
     lines.append(r"\newline")
     lines.append(r"\noindent Les coefficients de sensibilité, évalués aux valeurs nominales, sont :")
-    lines.append(r"\[")
     ci_terms = []
     for n in variable_names:
         ci     = res["sensitivities"][n]
@@ -587,13 +613,23 @@ def generate_bilan(
             rf"{{\partial {sym_map[n]}}}\right|_{{\mathrm{{nom}}}}"
             rf" = {dp_latex} = {_sci(ci, sig=global_sig_figs)}"
         )
-    lines.append(r"    " + r"\qquad ".join(ci_terms))
-    lines.append(r"\]")
+
+    if len(ci_terms) > 3:
+        # Plus de 3 coefficients : un par ligne, alignés sur le premier '='.
+        lines.append(r"\begin{align*}")
+        for i, term in enumerate(ci_terms):
+            suffix = r" \\" if i < len(ci_terms) - 1 else ""
+            term_aligned = term.replace(" = ", " &= ", 1)
+            lines.append(rf"    {term_aligned}{suffix}")
+        lines.append(r"\end{align*}")
+    else:
+        lines.append(r"\[")
+        lines.append(r"    " + r"\qquad ".join(ci_terms))
+        lines.append(r"\]")
     lines.append("")
 
     uc = res["uc"]
     lines.append(r"\noindent La propagation des incertitudes pour des grandeurs indépendantes donne :")
-    lines.append(r"\[")
     inner_terms = []
     for n in variable_names:
         if uncertainty_inputs[n]["type"] == "exact":
@@ -601,15 +637,40 @@ def generate_bilan(
         ci = res["sensitivities"][n]
         ui = uncertainty_inputs[n]["u"]
         inner_terms.append(
-            rf"({_sci(ci, sig=global_sig_figs)})^2 \, ({_si(ui, unit_map[n], sig=global_sig_figs)})^2"
+            rf"({_sci(ci, sig=global_sig_figs)})^2 \, ({_num(ui, sig=global_sig_figs)})^2"
         )
-    lines.append(
-        rf"    u_c({measurand_symbol}) = \sqrt{{{' + '.join(inner_terms)}}}"
-        rf" = {_si(uc, measurand_unit, sig=global_sig_figs)}"
-    )
-    lines.append(r"\]")
-    lines.append("")
 
+    radicand   = " + ".join(inner_terms)
+    result_str = _si(uc, measurand_unit, sig=global_sig_figs)
+
+    if len(radicand) > 90 and len(inner_terms) > 1:
+        # Expression trop longue pour une seule ligne :
+        # on regroupe 3 termes par ligne, S affiche sa valeur numérique.
+        S_val = uc ** 2
+        lines.append(r"\begin{align*}")
+        n_terms = len(inner_terms)
+        for i in range(0, n_terms, 3):
+            chunk  = inner_terms[i:i+3]
+            joined = " + ".join(chunk)
+            if i == 0:
+                prefix = r"    S &= "
+            else:
+                prefix = r"    &\quad + "
+            lines.append(rf"{prefix}{joined} \\")
+        lines.append(rf"    &= {_num(S_val, sig=global_sig_figs)}")
+        lines.append(r"\end{align*}")
+        lines.append(r"\[")
+        lines.append(
+            rf"    u_c({measurand_symbol}) = \sqrt{{S}} = {result_str}"
+        )
+        lines.append(r"\]")
+    else:
+        lines.append(r"\[")
+        lines.append(
+            rf"    u_c({measurand_symbol}) = \sqrt{{{radicand}}}"
+            rf" = {result_str}"
+        )
+        lines.append(r"\]")
     lines.append(r"\newline")
     nu_eff         = res.get("nu_eff", float("inf"))
     k              = res["k"]
@@ -626,11 +687,11 @@ def generate_bilan(
             nu_i = uncertainty_inputs[n].get("nu", float("inf"))
             if nu_i == float("inf"):
                 nu_lines.append(
-                    rf"\dfrac{{({_sci(ci)} \cdot {_si(ui, unit_map[n])})^4}}{{\infty}}"
+                    rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{\infty}}"
                 )
             else:
                 nu_lines.append(
-                    rf"\dfrac{{({_sci(ci)} \cdot {_si(ui, unit_map[n])})^4}}{{{int(nu_i)}}}"
+                    rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{{int(nu_i)}}}"
                 )
 
         a_descriptions = []
@@ -640,8 +701,12 @@ def generate_bilan(
                 rf"${sym_map[n]}$ porte sur $N = {N_mes}$ mesures "
                 rf"($\nu_{{{sym_map[n]}}} = {N_mes - 1}$)"
             )
+        if len(a_descriptions) > 1:
+            a_desc_str = ", ".join(a_descriptions[:-1]) + " et " + a_descriptions[-1]
+        else:
+            a_desc_str = a_descriptions[0]
         lines.append(
-            "\noindent La source " + " et ".join(a_descriptions)
+            r"\noindent La source " + a_desc_str
             + r". On détermine le facteur d'élargissement par Welch-Satterthwaite :"
         )
         lines.append(r"\[")
@@ -656,7 +721,7 @@ def generate_bilan(
         )
     else:
         lines.append(
-            rf"\noindent Toutes les composantes significatives sont de type~B ; "
+            rf"\noindent Toutes les composantes significatives sont de type~B, "
             rf"on retient $k = {k:.2f}$ (95\,\%)."
         )
     lines.append("")
@@ -665,12 +730,10 @@ def generate_bilan(
     lines.append(r"\[")
     lines.append(
         rf"    U({measurand_symbol}) = k\,u_c({measurand_symbol}) = "
-        rf"{k:.2f} \times {_si(uc, measurand_unit, sig=global_sig_figs)} = "
+        rf"{k:.2f} \times {_num(uc, sig=global_sig_figs)} = "
         rf"{_si(U, measurand_unit, sig=2)}"
     )
     lines.append(r"\]")
-    lines.append("")
-
     lines.append(r"\newline")
     lines.append(r"\noindent Le budget d'incertitudes :")
     lines.append(r"\[")
