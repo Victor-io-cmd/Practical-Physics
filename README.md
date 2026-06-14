@@ -16,7 +16,7 @@ Code généré avec [Claude (Anthropic)](https://www.anthropic.com) à partir d'
 
 Ce projet a pour but de simplifier et d'automatiser les calculs d'incertitudes pour des comptes rendus de travaux pratiques, à travers un moteur de calcul et un export LaTeX.
 
-Le moteur est conforme à la norme **GUM** (*Guide to the Expression of Uncertainty in Measurement*). Il couvre les incertitudes de types A et B, la propagation par dérivation via SymPy, le facteur d'élargissement par la formule de Welch-Satterthwaite, et la régression linéaire par la méthode des moindres carrés.
+Le moteur est conforme à la norme **GUM** (*Guide to the Expression of Uncertainty in Measurement*). Il couvre les incertitudes de types A et B, la propagation par dérivation symbolique via SymPy, le facteur d'élargissement par la formule de Welch-Satterthwaite, et la régression linéaire par moindres carrés.
 
 ---
 
@@ -28,6 +28,23 @@ gum-calc/
 ├── gum_calc.py                           # Moteur de calcul et export LaTeX
 └── README.md
 ```
+
+---
+
+## Fonctionnement global
+
+Le notebook template sert de référence, qui peut être adaptée pour chaque problème.
+Pour chaque TP, on duplique le notebook template et on remplit une cellule par mesurande. Chaque cellule suit la même structure :
+
+**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi uncertainty_type_A (répétition de mesures), uncertainty_type_B_from_resolution (résolution d'instrument), uncertainty_type_B_uniform (distribution uniforme connue), uncertainty_type_B_relative (incertitude déjà connue, par calibration ou propagée) et uncertainty_type_exact (constante).
+
+**Calcul GUM :** full_gum_analysis prend la formule du mesurande (en SymPy), les valeurs nominales et les incertitudes d'entrée, et renvoie le résultat propagé, l'incertitude composée uc, le facteur d'élargissement k (via Welch-Satterthwaite si nécessaire), l'incertitude élargie U, et le budget d'incertitudes.
+
+**Génération du bilan :** generate_bilan produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes-types détaillées, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
+
+**Export final :** generate_annexe assemble tous les bilans générés dans le notebook en une seule section LaTeX \section{Annexe : Bilans d'incertitudes}, à coller directement dans Overleaf.
+
+**Toute modification du moteur de calcul (formules, arrondis, format LaTeX) se fait exclusivement dans gum_calc.py, jamais dans le notebook.**
 
 ---
 
@@ -56,19 +73,6 @@ sys.path.insert(0, r"C:\chemin\vers\gum-calc")
 ```
 
 **Versions testées :** Python 3.11.9 · SymPy 1.14.0 · SciPy 1.17.1
-
----
-
-## Fonctionnement global
-
-Le workflow suit la logique suivante :
-
-1. On déclare les incertitudes de chaque grandeur d'entrée
-2. On calcule le mesurande avec `full_gum_analysis`
-3. On génère le bilan LaTeX avec `generate_bilan`
-4. En fin de notebook, `generate_annexe` assemble tout
-
-Les sections suivantes expliquent chaque étape dans l'ordre du code.
 
 ---
 

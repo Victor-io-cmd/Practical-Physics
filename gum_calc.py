@@ -645,17 +645,17 @@ def generate_bilan(
 
     if len(radicand) > 90 and len(inner_terms) > 1:
         # Expression trop longue pour une seule ligne :
-        # on regroupe 3 termes par ligne, S affiche sa valeur numérique.
+        # répartition équilibrée des termes entre les lignes (max 3 par ligne).
         S_val = uc ** 2
-        lines.append(r"\begin{align*}")
         n_terms = len(inner_terms)
-        for i in range(0, n_terms, 3):
-            chunk  = inner_terms[i:i+3]
+        n_lines = math.ceil(n_terms / 3)
+        terms_per_line = math.ceil(n_terms / n_lines)
+
+        lines.append(r"\begin{align*}")
+        for i in range(0, n_terms, terms_per_line):
+            chunk  = inner_terms[i:i+terms_per_line]
             joined = " + ".join(chunk)
-            if i == 0:
-                prefix = r"    S &= "
-            else:
-                prefix = r"    &\quad + "
+            prefix = r"    S &= " if i == 0 else r"    &\quad + "
             lines.append(rf"{prefix}{joined} \\")
         lines.append(rf"    &= {_num(S_val, sig=global_sig_figs)}")
         lines.append(r"\end{align*}")
