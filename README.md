@@ -16,7 +16,7 @@ Code généré avec [Claude (Anthropic)](https://www.anthropic.com) à partir d'
 
 Ce projet a pour but de simplifier et d'automatiser les calculs d'incertitudes pour des comptes rendus de travaux pratiques, à travers un moteur de calcul et un export LaTeX.
 
-Le moteur est conforme à la norme **GUM** (*Guide to the Expression of Uncertainty in Measurement*). Il couvre les incertitudes de types A et B, la propagation par dérivation symbolique via SymPy, le facteur d'élargissement par la formule de Welch-Satterthwaite, et la régression linéaire par moindres carrés.
+Le moteur est conforme à la norme **GUM** (*Guide to the Expression of Uncertainty in Measurement*). Il couvre les incertitudes de types A et B, la propagation par dérivation via SymPy, le facteur d'élargissement par la formule de Welch-Satterthwaite, et la régression linéaire par la méthode des moindres carrés.
 
 ---
 
