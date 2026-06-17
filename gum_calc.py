@@ -3,6 +3,7 @@ gum_calc.py — Moteur de calcul GUM + Export LaTeX
 """
 
 import math
+import warnings
 import sympy as sp
 from scipy import stats as scipy_stats
 
@@ -276,6 +277,24 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
     residuals = [y - yp for y, yp in zip(y_data, y_pred)]
     s2_res    = sum(r ** 2 for r in residuals) / (N - 2)
 
+    # Garde-fou GUM : en grande dynamique (x ou y de plusieurs ordres de
+    # grandeur), le calcul de `det` et des résidus peut souffrir d'une
+    # cancellation catastrophique (différence de grands nombres proches),
+    # produisant un résidu purement numérique sans qu'aucune exception ne
+    # soit levée. Une telle valeur n'a aucune signification physique et
+    # conduirait à une incertitude u(θ₁)/u(θ₀) artificiellement quasi nulle.
+    scale_y = max((y ** 2 for y in y_data), default=0.0)
+    if scale_y > 0 and s2_res < 1e-12 * scale_y:
+        warnings.warn(
+            "linear_regression : la variance résiduelle s2_res est du même "
+            "ordre que le bruit de troncature flottante (cancellation "
+            "catastrophique probable sur des données de grande dynamique). "
+            "L'incertitude sur theta0/theta1 qui en découle n'a "
+            "probablement aucune signification physique — vérifier "
+            "l'échelle des données en entrée.",
+            RuntimeWarning,
+        )
+
     u_theta1 = math.sqrt(s2_res * N / det)
     u_theta0 = math.sqrt(s2_res * sum_x2 / det)
 
@@ -307,29 +326,29 @@ def round_to_sig_figs(value: float, sig_figs: int) -> float:
     return round(value * factor) / factor
 
 
-def format_result(result: float, U: float) -> dict:
+def format_result(result: float, U: float, sig_figs_exact: int = 4) -> dict:
     """
     Arrondit le résultat et l'incertitude élargie de façon cohérente.
 
-    L'incertitude élargie U est arrondie à 2 chiffres significatifs.
-    Le résultat est arrondi au même ordre de grandeur que U.
-
-    Retourne un dict avec :
-      result   — valeur nominale arrondie (float)
-      U        — incertitude élargie arrondie à 2 chiffres sig
-      decimals — nombre de décimales utiles (pour affichage cohérent)
-
-    FIX : decimals est désormais calculé uniquement à partir de mag_U,
-    ce qui évite les valeurs aberrantes quand mag_U > 0.
+    Si U_rounded == 0 (toutes les grandeurs d'entrée sont exactes), le
+    résultat est tout de même arrondi à `sig_figs_exact` chiffres
+    significatifs : sans cela, tout code consultant directement
+    `result_rounded` (notebook, print de débogage...) sans repasser par
+    `_format_result_uncertainty` recevrait la précision flottante brute.
     """
     U_rounded = round_to_sig_figs(U, 2)
     if U_rounded == 0:
-        return {"result": result, "U": 0.0, "decimals": 2}
+        result_rounded = round_to_sig_figs(result, sig_figs_exact) if result != 0 else 0.0
+        return {"result": result_rounded, "U": 0.0, "decimals": 0}
 
-    mag_U          = math.floor(math.log10(abs(U_rounded)))
-    decimals       = max(0, -mag_U + 1)
-    factor         = 10 ** mag_U
-    result_rounded = math.floor(result / factor + 0.5) * factor
+    mag_U    = math.floor(math.log10(abs(U_rounded)))
+    decimals = -mag_U + 1
+    factor   = 10 ** (mag_U - 1)
+
+    if result >= 0:
+        result_rounded = math.floor(result / factor + 0.5) * factor
+    else:
+        result_rounded = -math.floor(-result / factor + 0.5) * factor
 
     return {
         "result": result_rounded,
@@ -347,23 +366,6 @@ def full_gum_analysis(
 ) -> dict:
     """
     Pipeline GUM complet : propagation + Welch-Satterthwaite + formatage.
-
-    Paramètres
-    ----------
-    formula_str       : expression SymPy du mesurande.
-    variable_names    : liste ordonnée des noms de variables.
-    nominal_values    : dict {nom: valeur nominale}.
-    uncertainty_inputs: dict {nom: dict renvoyé par uncertainty_type_*}.
-    k_override        : facteur d'élargissement forcé (optionnel).
-                        Si None, k est déterminé par Welch-Satterthwaite.
-
-    Retourne le dict de calculate_uncertainty enrichi de :
-      nu_eff         — degrés de liberté effectifs
-      k              — facteur d'élargissement retenu
-      U              — incertitude élargie U = k · u_c
-      result_rounded — valeur nominale arrondie
-      U_rounded      — U arrondie à 2 chiffres significatifs
-      decimals       — nombre de décimales pour affichage cohérent
     """
     calc = calculate_uncertainty(
         formula_str, variable_names, nominal_values, uncertainty_inputs
@@ -393,83 +395,111 @@ def full_gum_analysis(
 # PARTIE 2 — EXPORT LATEX
 # ============================================================
 
-def _sci(value: float, sig: int = 2) -> str:
-    """
-    Formate value en notation scientifique LaTeX (×10^n).
-    Pour les valeurs dans [-2, 3] en ordre de grandeur, utilise la notation
-    décimale standard. En dehors, utilise a × 10^n.
-
-    FIX : gestion correcte des valeurs négatives en notation scientifique.
-    """
-    if value == 0:
-        return "0"
+def _mantissa_exp(value: float, sig: int):
     sign     = "-" if value < 0 else ""
     mag      = math.floor(math.log10(abs(value)))
-    if -2 <= mag <= 3:
-        decimals = max(0, sig - 1 - mag)
-        return f"{value:.{decimals}f}"
-    mantissa = abs(value) / (10 ** mag)
-    mantissa = round(mantissa, sig - 1)
-    if mantissa == int(mantissa):
-        mantissa_str = str(int(mantissa))
-    else:
-        mantissa_str = f"{mantissa:.{sig-1}f}"
-    return rf"{sign}{mantissa_str} \times 10^{{{mag}}}"
+    mantissa = round(abs(value) / (10 ** mag), sig - 1)
+    if mantissa >= 10:
+        mantissa /= 10
+        mag      += 1
+    return sign, mantissa, mag
+
+
+def _latex_ln(expr) -> str:
+    """
+    Rend une expression SymPy en LaTeX en forçant la notation `\\ln` pour
+    le logarithme népérien.
+
+    `sympy.log(x)` est le logarithme népérien, mais son rendu LaTeX par
+    défaut est `\\log` (sans base explicite), ce qui peut induire en erreur
+    un lecteur habitué à la convention « log = base 10, ln = base e ».
+    Vérifié empiriquement : même `sympy.log(x, 10)` (base explicite) est
+    décomposé en interne par SymPy en `log(x)/log(10)` — il n'existe pas
+    de forme `\\log_{10}{...}` produite par le printer LaTeX de SymPy.
+    La substitution globale `\\log{` -> `\\ln{` est donc sans risque de
+    faux positif sur une base explicite.
+    """
+    return sp.latex(expr).replace(r"\log{", r"\ln{")
+
+
+def _sci(value: float, sig: int = 2) -> str:
+    """
+    Alias historique conservé pour compatibilité d'appel : délègue
+    entièrement à `_num`. Auparavant `_sci` retournait une chaîne brute
+    (jamais encapsulée dans `\\num{}`), ce qui produisait un séparateur
+    décimal point au lieu de virgule quel que soit le réglage de locale —
+    notamment pour tous les coefficients de sensibilité. La délégation à
+    `_num` corrige ce point sans dupliquer la logique de formatage.
+    """
+    return _num(value, sig=sig)
 
 
 def _num(value: float, sig: int = 3) -> str:
-    """
-    Formate value sans unité, pour les termes intermédiaires des calculs
-    (numérateurs, dénominateurs, termes sous une racine, etc.).
-
-    Même convention de seuils que _si/_sci : notation décimale standard
-    pour un ordre de grandeur dans [-2, 3], notation scientifique sinon
-    (compatible \\num{} de siunitx).
-    """
     if value == 0:
         return r"\num{0}"
-    sign = "-" if value < 0 else ""
-    mag  = math.floor(math.log10(abs(value)))
+    value = round_to_sig_figs(value, sig)
+    sign  = "-" if value < 0 else ""
+    mag   = math.floor(math.log10(abs(value)))
     if -2 <= mag <= 3:
         decimals = max(0, sig - 1 - mag)
         val_str  = f"{value:.{decimals}f}"
     else:
-        mantissa = abs(value) / (10 ** mag)
-        mantissa = round(mantissa, sig - 1)
-        val_str  = f"{sign}{mantissa:.{sig-1}f}e{mag}"
+        _, mantissa, mag = _mantissa_exp(value, sig)
+        val_str = f"{sign}{mantissa:.{sig-1}f}e{mag}"
     return rf"\num{{{val_str}}}"
 
 
 def _si(value: float, unit: str, sig: int = 3) -> str:
-    """
-    Formate value avec son unité pour le package siunitx : \\SI{val}{unit}.
-    Pour les valeurs hors de [-2, 3] en ordre de grandeur, utilise la
-    notation scientifique compatible siunitx (ex: 1.50e-5).
-
-    FIX : gestion correcte des valeurs négatives en notation scientifique.
-    """
     if value == 0:
-        return rf"\SI{{0}}{{{unit}}}" if unit else "0"
-    sign = "-" if value < 0 else ""
-    mag  = math.floor(math.log10(abs(value)))
+        return rf"\SI{{0}}{{{unit}}}" if unit else r"\num{0}"
+    if not unit:
+        return _num(value, sig=sig)
+    value = round_to_sig_figs(value, sig)
+    sign  = "-" if value < 0 else ""
+    mag   = math.floor(math.log10(abs(value)))
     if -2 <= mag <= 3:
         decimals = max(0, sig - 1 - mag)
         val_str  = f"{value:.{decimals}f}"
     else:
-        mantissa = abs(value) / (10 ** mag)
-        mantissa = round(mantissa, sig - 1)
-        val_str  = f"{sign}{mantissa:.{sig-1}f}e{mag}"
-    if unit:
-        return rf"\SI{{{val_str}}}{{{unit}}}"
-    else:
-        return val_str
+        _, mantissa, mag = _mantissa_exp(value, sig)
+        val_str = f"{sign}{mantissa:.{sig-1}f}e{mag}"
+    return rf"\SI{{{val_str}}}{{{unit}}}"
 
 
 def _unit_tex(unit_str: str) -> str:
-    """Formate une unité pour affichage inline en mode texte LaTeX."""
     if unit_str:
         return rf"\,\text{{{unit_str}}}"
     return ""
+
+
+def _format_result_uncertainty(
+    result_rounded: float,
+    U_rounded: float,
+    decimals: int,
+    unit: str,
+    sig_figs_exact: int = 4,
+) -> str:
+    if U_rounded == 0:
+        val = round_to_sig_figs(result_rounded, sig_figs_exact) if result_rounded != 0 else 0.0
+        return _si(val, unit, sig=sig_figs_exact) if unit else _num(val, sig=sig_figs_exact)
+
+    mag_result = math.floor(math.log10(abs(result_rounded))) if result_rounded != 0 else 0
+
+    if -2 <= mag_result <= 3:
+        d       = max(0, decimals)
+        val_str = f"{result_rounded:.{d}f}"
+        u_str   = f"{U_rounded:.{d}f}"
+        body    = rf"{val_str} +- {u_str}"
+    else:
+        d       = max(0, decimals + mag_result)
+        scale   = 10 ** mag_result
+        val_str = f"{result_rounded / scale:.{d}f}"
+        u_str   = f"{U_rounded / scale:.{d}f}"
+        body    = rf"{val_str} +- {u_str} e{mag_result}"
+
+    if unit:
+        return rf"\SI{{{body}}}{{{unit}}}"
+    return rf"\num{{{body}}}"
 
 
 def generate_bilan(
@@ -488,26 +518,6 @@ def generate_bilan(
 ) -> str:
     """
     Génère le bloc LaTeX complet du bilan d'incertitudes pour un mesurande.
-
-    Le bloc inclut : modèle de mesure, valeurs nominales, incertitudes-types
-    source par source, coefficients de sensibilité, Welch-Satterthwaite si
-    nécessaire, budget d'incertitudes, et résultat encadré.
-
-    Paramètres
-    ----------
-    measurand_name   : nom en toutes lettres du mesurande (ex: "Résistance").
-    measurand_symbol : symbole LaTeX du mesurande (ex: "R").
-    formula_str      : expression SymPy du mesurande.
-    variable_names   : liste ordonnée des noms de variables Python.
-    variable_symbols : dict {nom_python: symbole_LaTeX}.
-    variable_units   : dict {nom_python: unité_siunitx}.
-    nominal_values   : dict {nom_python: valeur nominale}.
-    uncertainty_inputs: dict {nom_python: dict uncertainty_type_*}.
-    measurand_unit   : unité siunitx du mesurande (ex: r"\\ohm").
-    k_override       : facteur k forcé (None = Welch-Satterthwaite auto).
-    subsection       : si True, génère un \\subsection{} en tête.
-    global_sig_figs  : nombre de chiffres significatifs pour l'affichage
-                       des valeurs intermédiaires (défaut 3).
     """
     res      = full_gum_analysis(
         formula_str, variable_names, nominal_values, uncertainty_inputs, k_override
@@ -523,7 +533,7 @@ def generate_bilan(
     formula_sympy = sp.sympify(formula_str, locals={n: sp.Symbol(n) for n in variable_names})
     for n in variable_names:
         formula_sympy = formula_sympy.subs(sp.Symbol(n), sp.Symbol(sym_map[n]))
-    formula_latex = sp.latex(formula_sympy)
+    formula_latex = _latex_ln(formula_sympy)
 
     lines.append(rf"\noindent Le mesurande ${measurand_symbol}$ est lié aux grandeurs d'entrée par le modèle :")
     lines.append(r"\[")
@@ -540,10 +550,11 @@ def generate_bilan(
         defs_str = ", ".join(defs[:-1]) + " et " + defs[-1]
     else:
         defs_str = defs[0]
+    
     lines.append(
         r"\noindent avec " + defs_str
         + rf", ce qui donne la valeur nominale "
-        rf"${measurand_symbol}_{{\mathrm{{nom}}}} = {_si(nom_val, measurand_unit, sig=global_sig_figs)}$."
+        rf"$\left.{measurand_symbol}\right|_{{\mathrm{{nom}}}} = {_si(nom_val, measurand_unit, sig=global_sig_figs)}$."
     )
     lines.append(r"\newline")
     lines.append("")
@@ -560,15 +571,16 @@ def generate_bilan(
                 rf"Son incertitude-type est nulle : $u({sym}) = 0$."
             )
         elif inp["type"] == "A":
-            N_mes = inp["N"]
-            s     = inp["s"]
+            N_mes     = inp["N"]
+            s         = inp["s"]
+            sym_mean  = sym if sym.strip().startswith(r"\bar{") else rf"\bar{{{sym}}}"
             lines.append(
                 rf"\noindent La répétition de $N = {N_mes}$ mesures sur ${sym}$ fournit "
                 rf"une incertitude de type~A :"
             )
             lines.append(r"\[")
             lines.append(
-                rf"    u_A(\bar{{{sym}}}) = \frac{{s_{{{sym}}}}}{{\sqrt{{{N_mes}}}}}"
+                rf"    u_A({sym_mean}) = \frac{{s_{{{sym}}}}}{{\sqrt{{{N_mes}}}}}"
                 rf" = \frac{{{_num(s, sig=global_sig_figs)}}}{{\sqrt{{{N_mes}}}}}"
                 rf" = {_si(u_val, unit, sig=global_sig_figs)}"
             )
@@ -599,7 +611,6 @@ def generate_bilan(
                 lines.append(r"\]")
         lines.append("")
 
-    lines.append(r"\newline")
     lines.append(r"\noindent Les coefficients de sensibilité, évalués aux valeurs nominales, sont :")
     ci_terms = []
     for n in variable_names:
@@ -607,15 +618,15 @@ def generate_bilan(
         dp_sym = res["partial_derivs"][n]
         for nn in variable_names:
             dp_sym = dp_sym.subs(sp.Symbol(nn), sp.Symbol(sym_map[nn]))
-        dp_latex = sp.latex(dp_sym)
+        dp_latex = _latex_ln(dp_sym)
         ci_terms.append(
             rf"c_{{{sym_map[n]}}} = \left.\frac{{\partial {measurand_symbol}}}"
             rf"{{\partial {sym_map[n]}}}\right|_{{\mathrm{{nom}}}}"
             rf" = {dp_latex} = {_sci(ci, sig=global_sig_figs)}"
         )
 
-    if len(ci_terms) > 3:
-        # Plus de 3 coefficients : un par ligne, alignés sur le premier '='.
+    ci_line = r"\qquad ".join(ci_terms)
+    if len(ci_terms) > 3 or len(ci_line) > 90:
         lines.append(r"\begin{align*}")
         for i, term in enumerate(ci_terms):
             suffix = r" \\" if i < len(ci_terms) - 1 else ""
@@ -624,12 +635,11 @@ def generate_bilan(
         lines.append(r"\end{align*}")
     else:
         lines.append(r"\[")
-        lines.append(r"    " + r"\qquad ".join(ci_terms))
+        lines.append(r"    " + ci_line)
         lines.append(r"\]")
     lines.append("")
 
     uc = res["uc"]
-    lines.append(r"\noindent La propagation des incertitudes pour des grandeurs indépendantes donne :")
     inner_terms = []
     for n in variable_names:
         if uncertainty_inputs[n]["type"] == "exact":
@@ -640,74 +650,69 @@ def generate_bilan(
             rf"({_sci(ci, sig=global_sig_figs)})^2 \, ({_num(ui, sig=global_sig_figs)})^2"
         )
 
-    radicand   = " + ".join(inner_terms)
-    result_str = _si(uc, measurand_unit, sig=global_sig_figs)
-
-    if len(radicand) > 90 and len(inner_terms) > 1:
-        # Expression trop longue pour une seule ligne :
-        # répartition équilibrée des termes entre les lignes (max 3 par ligne).
-        S_val = uc ** 2
-        n_terms = len(inner_terms)
-        n_lines = math.ceil(n_terms / 3)
-        terms_per_line = math.ceil(n_terms / n_lines)
-
-        lines.append(r"\begin{align*}")
-        for i in range(0, n_terms, terms_per_line):
-            chunk  = inner_terms[i:i+terms_per_line]
-            joined = " + ".join(chunk)
-            prefix = r"    S &= " if i == 0 else r"    &\quad + "
-            lines.append(rf"{prefix}{joined} \\")
-        lines.append(rf"    &= {_num(S_val, sig=global_sig_figs)}")
-        lines.append(r"\end{align*}")
-        lines.append(r"\[")
+    if not inner_terms:
         lines.append(
-            rf"    u_c({measurand_symbol}) = \sqrt{{S}} = {result_str}"
+            rf"\noindent Toutes les grandeurs d'entrée étant des constantes exactes, "
+            rf"l'incertitude-type composée est nulle : $u_c({measurand_symbol}) = 0$."
         )
-        lines.append(r"\]")
+        lines.append(r"\newline")
     else:
-        lines.append(r"\[")
-        lines.append(
-            rf"    u_c({measurand_symbol}) = \sqrt{{{radicand}}}"
-            rf" = {result_str}"
-        )
-        lines.append(r"\]")
-    lines.append(r"\newline")
-    nu_eff         = res.get("nu_eff", float("inf"))
-    k              = res["k"]
-    type_A_sources = [n for n in variable_names if uncertainty_inputs[n]["type"] == "A"]
-    has_small_A    = any(uncertainty_inputs[n]["N"] < 30 for n in type_A_sources)
+        lines.append(r"\noindent La propagation des incertitudes pour des grandeurs indépendantes donne :")
+        radicand   = " + ".join(inner_terms)
+        result_str = _si(uc, measurand_unit, sig=global_sig_figs)
 
-    if nu_eff != float("inf") and type_A_sources:
+        if len(inner_terms) > 1 and (len(radicand) > 70 or len(inner_terms) >= 3):
+            S_val = uc ** 2
+            n_terms = len(inner_terms)
+            n_lines = math.ceil(n_terms / 3)
+            terms_per_line = math.ceil(n_terms / n_lines)
+
+            lines.append(r"\begin{align*}")
+            for i in range(0, n_terms, terms_per_line):
+                chunk  = inner_terms[i:i+terms_per_line]
+                joined = " + ".join(chunk)
+                prefix = r"    S &= " if i == 0 else r"    &\quad + "
+                lines.append(rf"{prefix}{joined} \\")
+            lines.append(rf"    &= {_num(S_val, sig=global_sig_figs)}")
+            lines.append(r"\end{align*}")
+            lines.append(r"\[")
+            lines.append(
+                rf"    u_c({measurand_symbol}) = \sqrt{{S}} = {result_str}"
+            )
+            lines.append(r"\]")
+        else:
+            lines.append(r"\[")
+            lines.append(
+                rf"    u_c({measurand_symbol}) = \sqrt{{{radicand}}}"
+                rf" = {result_str}"
+            )
+            lines.append(r"\]")
+        lines.append(r"\newline")
+
+    nu_eff = res.get("nu_eff", float("inf"))
+    k      = res["k"]
+
+    if nu_eff != float("inf"):
         nu_lines = []
+        descriptions = []
         for n in variable_names:
             if uncertainty_inputs[n]["type"] == "exact":
                 continue
             ci   = res["sensitivities"][n]
             ui   = uncertainty_inputs[n]["u"]
             nu_i = uncertainty_inputs[n].get("nu", float("inf"))
+            
             if nu_i == float("inf"):
-                nu_lines.append(
-                    rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{\infty}}"
-                )
+                nu_lines.append(rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{\infty}}")
             else:
-                nu_lines.append(
-                    rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{{int(nu_i)}}}"
-                )
+                nu_lines.append(rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{{int(nu_i)}}}")
+                type_str = "type~A" if uncertainty_inputs[n]["type"] == "A" else "type~B"
+                descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {int(nu_i)}$)")
 
-        a_descriptions = []
-        for n in type_A_sources:
-            N_mes = uncertainty_inputs[n]["N"]
-            a_descriptions.append(
-                rf"${sym_map[n]}$ porte sur $N = {N_mes}$ mesures "
-                rf"($\nu_{{{sym_map[n]}}} = {N_mes - 1}$)"
-            )
-        if len(a_descriptions) > 1:
-            a_desc_str = ", ".join(a_descriptions[:-1]) + " et " + a_descriptions[-1]
-        else:
-            a_desc_str = a_descriptions[0]
+        desc_str = ", ".join(descriptions[:-1]) + " et " + descriptions[-1] if len(descriptions) > 1 else descriptions[0]
         lines.append(
-            r"\noindent La source " + a_desc_str
-            + r". On détermine le facteur d'élargissement par Welch-Satterthwaite :"
+            rf"\noindent Les degrés de liberté étant finis pour {desc_str}, "
+            r"on détermine le facteur d'élargissement par la formule de Welch-Satterthwaite :"
         )
         lines.append(r"\[")
         lines.append(
@@ -717,12 +722,12 @@ def generate_bilan(
         lines.append(r"\]")
         lines.append(
             rf"\noindent Pour $\nu_{{\mathrm{{eff}}}} = {nu_eff:.0f}$ (95\,\%), "
-            rf"la table de Student donne $k = {k:.2f}$."
+            rf"la table de Student donne $k = \num{{{k:.2f}}}$."
         )
     else:
         lines.append(
-            rf"\noindent Toutes les composantes significatives sont de type~B, "
-            rf"on retient $k = {k:.2f}$ (95\,\%)."
+            rf"\noindent Toutes les composantes configurées possèdent des degrés de liberté infinis, "
+            rf"on retient la standardisation classique $k = \num{{{k:.2f}}}$ (95\,\%)."
         )
     lines.append("")
 
@@ -730,29 +735,40 @@ def generate_bilan(
     lines.append(r"\[")
     lines.append(
         rf"    U({measurand_symbol}) = k\,u_c({measurand_symbol}) = "
-        rf"{k:.2f} \times {_num(uc, sig=global_sig_figs)} = "
+        rf"\num{{{k:.2f}}} \times {_num(uc, sig=global_sig_figs)} = "
         rf"{_si(U, measurand_unit, sig=2)}"
     )
     lines.append(r"\]")
     lines.append(r"\newline")
-    lines.append(r"\noindent Le budget d'incertitudes :")
-    lines.append(r"\[")
-    budget_terms = []
-    for n in variable_names:
-        if uncertainty_inputs[n]["type"] == "exact":
-            continue
-        pct = res["budget"][n]
-        budget_terms.append(
-            rf"\frac{{c_{{{sym_map[n]}}}^2\,u^2({sym_map[n]})}}{{u_c^2({measurand_symbol})}} = {pct:.1f}\,\%"
-        )
-    lines.append(r"    " + r"\qquad ".join(budget_terms))
-    lines.append(r"\]")
 
     non_exact_budget = {
         kk: vv for kk, vv in res["budget"].items()
         if uncertainty_inputs[kk]["type"] != "exact"
     }
+    
     if non_exact_budget:
+        lines.append(r"\noindent Le budget d'incertitudes :")
+        budget_terms = []
+        for n in variable_names:
+            if uncertainty_inputs[n]["type"] == "exact":
+                continue
+            pct = res["budget"][n]
+            budget_terms.append(
+                rf"\frac{{c_{{{sym_map[n]}}}^2\,u^2({sym_map[n]})}}{{u_c^2({measurand_symbol})}} = \num{{{pct:.1f}}}\,\%"
+            )
+        budget_line = r"\qquad ".join(budget_terms)
+        if len(budget_terms) > 3 or len(budget_line) > 90:
+            lines.append(r"\begin{align*}")
+            for i, term in enumerate(budget_terms):
+                suffix = r" \\" if i < len(budget_terms) - 1 else ""
+                term_aligned = term.replace(" = ", " &= ", 1)
+                lines.append(rf"    {term_aligned}{suffix}")
+            lines.append(r"\end{align*}")
+        else:
+            lines.append(r"\[")
+            lines.append(r"    " + budget_line)
+            lines.append(r"\]")
+
         dominant = max(non_exact_budget, key=non_exact_budget.get)
         lines.append(
             rf"\noindent La mesure de ${sym_map[dominant]}$ contribue à "
@@ -762,114 +778,14 @@ def generate_bilan(
 
     lines.append(r"\noindent Le résultat final s'écrit :")
     lines.append(r"\[")
-    # Formater la valeur nominale arrondie : \num{} sans unité (portée par l'incertitude)
-    val_str = _si(res['result_rounded'], "", sig=global_sig_figs).replace(r"\SI{", "").replace("}{}", "")
-    # Utiliser \num{} si la valeur est simple, sinon construire manuellement
-    mag_val = math.floor(math.log10(abs(res['result_rounded']))) if res['result_rounded'] != 0 else 0
-    if -2 <= mag_val <= 3:
-        decimals_val = max(0, global_sig_figs - 1 - mag_val)
-        num_str = rf"\num{{{res['result_rounded']:.{decimals_val}f}}}"
-    else:
-        mantissa = abs(res['result_rounded']) / (10 ** mag_val)
-        mantissa = round(mantissa, global_sig_figs - 1)
-        sign = "-" if res['result_rounded'] < 0 else ""
-        num_str = rf"\num{{{sign}{mantissa:.{global_sig_figs-1}f}e{mag_val}}}"
-    lines.append(
-        rf"    \boxed{{{measurand_symbol} = "
-        rf"{num_str} \pm "
-        rf"{_si(res['U_rounded'], measurand_unit, sig=2)}}}"
+    final_expr = _format_result_uncertainty(
+        result_rounded=res['result_rounded'],
+        U_rounded=res['U_rounded'],
+        decimals=res['decimals'],
+        unit=measurand_unit,
+        sig_figs_exact=global_sig_figs
     )
-    lines.append(r"\]")
-
-    return "\n".join(lines)
-
-
-def generate_bilan_regression(
-    x_symbol: str,
-    y_symbol: str,
-    x_unit: str,
-    y_unit: str,
-    x_data: list[float],
-    y_data: list[float],
-    subsection_title: str = "Régression linéaire",
-    slope_unit: str = "",
-    intercept_unit: str = "",
-    slope_symbol: str = r"\theta_1",
-    intercept_symbol: str = r"\theta_0",
-    _reg_precomputed: dict = None,
-) -> str:
-    """
-    Génère le bloc LaTeX du bilan de régression linéaire.
-
-    Paramètres
-    ----------
-    x_symbol, y_symbol     : symboles LaTeX des axes.
-    x_unit, y_unit         : unités siunitx des axes.
-    x_data, y_data         : données expérimentales.
-    subsection_title       : titre de la sous-section.
-    slope_unit             : unité siunitx de la pente (défaut : y_unit/x_unit).
-    intercept_unit         : unité siunitx de l'ordonnée à l'origine (défaut : y_unit).
-    slope_symbol           : symbole LaTeX de la pente (défaut : r"\\theta_1").
-    intercept_symbol       : symbole LaTeX de l'ordonnée à l'origine (défaut : r"\\theta_0").
-    _reg_precomputed       : dict issu de linear_regression() déjà calculé (usage interne,
-                             évite le double calcul dans full_pipeline_regression_to_measurand).
-    """
-    reg   = _reg_precomputed if _reg_precomputed is not None else linear_regression(x_data, y_data)
-    lines = []
-
-    s_unit = slope_unit if slope_unit else (
-        rf"{y_unit}/{x_unit}" if x_unit and y_unit else ""
-    )
-    i_unit = intercept_unit if intercept_unit else y_unit
-
-    lines.append(rf"\subsection{{Bilan --- {subsection_title}}}")
-    lines.append("")
-    lines.append(
-        rf"On cherche les paramètres de la droite "
-        rf"${y_symbol} = {intercept_symbol} + {slope_symbol} \cdot {x_symbol}$ :"
-    )
-    lines.append(r"\[")
-    lines.append(
-        rf"    Q({intercept_symbol}, {slope_symbol}) = "
-        rf"\sum_{{i=1}}^{{N}} \left(y_i - ({intercept_symbol} + {slope_symbol} x_i)\right)^2"
-    )
-    lines.append(r"\]")
-    lines.append("")
-
-    N = reg["N"]
-    lines.append(rf"Avec $N = {N}$ points de mesure, les estimateurs sont :")
-    lines.append(r"\[")
-    lines.append(rf"    {slope_symbol} = {_si(reg['theta1'], s_unit, sig=3)}")
-    lines.append(r"\]")
-    lines.append(r"\[")
-    lines.append(rf"    {intercept_symbol} = {_si(reg['theta0'], i_unit, sig=3)}")
-    lines.append(r"\]")
-    lines.append("")
-    lines.append(
-        rf"Les incertitudes-types associées "
-        rf"($s^2_{{\mathrm{{res}}}} = {_sci(reg['s_res']**2, sig=3)}$) sont :"
-    )
-    lines.append(r"\[")
-    lines.append(
-        rf"    u({intercept_symbol}) = {_si(reg['u_theta0'], i_unit, sig=2)} "
-        rf"\qquad u({slope_symbol}) = {_si(reg['u_theta1'], s_unit, sig=2)}"
-    )
-    lines.append(r"\]")
-    lines.append("")
-    lines.append(
-        rf"Le coefficient de corrélation $r^2 = {reg['r2']:.4f}$ "
-        rf"confirme la qualité de l'ajustement."
-    )
-    lines.append(r"\newline")
-    lines.append("")
-    lines.append(r"Le résultat de la régression s'écrit :")
-    lines.append(r"\[")
-    lines.append(
-        rf"    \boxed{{{y_symbol} = "
-        rf"\left({_si(reg['theta0'], i_unit, sig=3)} \pm {_si(reg['u_theta0'], i_unit, sig=2)}\right)"
-        rf" + \left({_si(reg['theta1'], s_unit, sig=3)} \pm {_si(reg['u_theta1'], s_unit, sig=2)}\right)"
-        rf" \cdot {x_symbol}}}"
-    )
+    lines.append(rf"    \boxed{{{measurand_symbol} = {final_expr}}}")
     lines.append(r"\]")
 
     return "\n".join(lines)
@@ -901,23 +817,6 @@ def full_pipeline_regression_to_measurand(
 ) -> str:
     """
     Génère d'un seul appel le LaTeX complet : régression + propagation GUM.
-
-    À utiliser quand le mesurande final dépend d'un paramètre de régression
-    (pente ou ordonnée à l'origine) et d'autres grandeurs mesurées séparément.
-
-    Les variables 'theta1' et/ou 'theta0' dans variable_names sont reconnues
-    automatiquement et alimentées par la régression. Les autres variables sont
-    fournies via nominal_values_helpers et uncertainty_inputs_helpers.
-
-    Paramètres clés
-    ---------------
-    variable_names            : doit inclure 'theta1' et/ou 'theta0'.
-    nominal_values_helpers    : valeurs nominales des variables hors régression.
-    uncertainty_inputs_helpers: incertitudes des variables hors régression.
-    slope_symbol, intercept_symbol : notation LaTeX (transmise aux deux blocs).
-
-    FIX : la régression n'est calculée qu'une seule fois et transmise à
-    generate_bilan_regression via _reg_precomputed.
     """
     reg      = linear_regression(x_data, y_data)
     nominals = {**nominal_values_helpers}
@@ -957,16 +856,100 @@ def full_pipeline_regression_to_measurand(
     return tex_reg + "\n\n\\clearpage\n\n" + tex_gum
 
 
+def generate_bilan_regression(
+    x_symbol: str,
+    y_symbol: str,
+    x_unit: str,
+    y_unit: str,
+    x_data: list[float],
+    y_data: list[float],
+    subsection_title: str = "Régression linéaire",
+    slope_unit: str = "",
+    intercept_unit: str = "",
+    slope_symbol: str = r"\theta_1",
+    intercept_symbol: str = r"\theta_0",
+    _reg_precomputed: dict = None,
+) -> str:
+    reg   = _reg_precomputed if _reg_precomputed is not None else linear_regression(x_data, y_data)
+    lines = []
+
+    s_unit = slope_unit if slope_unit else (
+        rf"{y_unit}\per{x_unit}" if x_unit and y_unit else ""
+    )
+    i_unit = intercept_unit if intercept_unit else y_unit
+
+    lines.append(rf"\subsection{{Bilan --- {subsection_title}}}")
+    lines.append("")
+    lines.append(
+        rf"On cherche les paramètres de la droite "
+        rf"${y_symbol} = {intercept_symbol} + {slope_symbol} \cdot {x_symbol}$ :"
+    )
+    lines.append(r"\[")
+    lines.append(
+        rf"    Q({intercept_symbol}, {slope_symbol}) = "
+        rf"\sum_{{i=1}}^{{N}} \left(y_i - ({intercept_symbol} + {slope_symbol} x_i)\right)^2"
+    )
+    lines.append(r"\]")
+    lines.append("")
+
+    N = reg["N"]
+    lines.append(rf"Avec $N = {N}$ points de mesure, les estimateurs sont :")
+    lines.append(r"\[")
+    lines.append(rf"    {slope_symbol} = {_si(reg['theta1'], s_unit, sig=3)}")
+    lines.append(r"\]")
+    lines.append(r"\[")
+    lines.append(rf"    {intercept_symbol} = {_si(reg['theta0'], i_unit, sig=3)}")
+    lines.append(r"\]")
+    lines.append("")
+    lines.append(
+        rf"Les incertitudes-types associées "
+        rf"($s^2_{{\mathrm{{res}}}} = {_sci(reg['s_res']**2, sig=3)}$) sont :"
+    )
+    lines.append(r"\[")
+    lines.append(
+        rf"    u({intercept_symbol}) = {_si(reg['u_theta0'], i_unit, sig=2)} "
+        rf"\qquad u({slope_symbol}) = {_si(reg['u_theta1'], s_unit, sig=2)}"
+    )
+    lines.append(r"\]")
+    lines.append("")
+    lines.append(
+        rf"Le coefficient de corrélation $r^2 = \num{{{reg['r2']:.4f}}}$ "
+        rf"confirme la qualité de l'ajustement."
+    )
+    lines.append(r"\newline")
+    lines.append("")
+    lines.append(r"Le résultat de la régression s'écrit :")
+
+    intercept_term = (
+        rf"\left({_si(reg['theta0'], i_unit, sig=3)} \pm {_si(reg['u_theta0'], i_unit, sig=2)}\right)"
+    )
+    slope_term = (
+        rf"\left({_si(reg['theta1'], s_unit, sig=3)} \pm {_si(reg['u_theta1'], s_unit, sig=2)}\right)"
+    )
+    box_inline = rf"{y_symbol} = {intercept_term} + {slope_term} \cdot {x_symbol}"
+
+    lines.append(r"\[")
+    if len(box_inline) > 70:
+        # Fallback multi-ligne : un \boxed{} ne peut contenir qu'une seule
+        # ligne de display math nativement ; on imbrique un environnement
+        # `array` pour conserver l'encadrement sur un résultat trop long
+        # (cas fréquent dès que les unités composées entrent en jeu).
+        lines.append(r"    \boxed{")
+        lines.append(r"    \begin{array}{c}")
+        lines.append(rf"    {y_symbol} = {intercept_term} \\[4pt]")
+        lines.append(rf"    {{}} + {slope_term} \cdot {x_symbol}")
+        lines.append(r"    \end{array}")
+        lines.append(r"    }")
+    else:
+        lines.append(rf"    \boxed{{{box_inline}}}")
+    lines.append(r"\]")
+
+    return "\n".join(lines)
+
+
 def generate_annexe(bilans: list[str]) -> str:
     """
     Assemble la section LaTeX d'annexe à partir d'une liste de bilans.
-
-    Chaque élément de bilans est la chaîne retournée par generate_bilan()
-    ou generate_bilan_regression(). L'ordre de la liste détermine l'ordre
-    dans le PDF final.
-
-    Exemple d'usage :
-        print(generate_annexe([bilan_R, bilan_C, bilan_reg]))
     """
     body = "\n\n".join(bilans)
     return r"\section{Annexe : Bilans d'incertitudes}" + "\n\n" + body
