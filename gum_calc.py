@@ -3,6 +3,7 @@ gum_calc.py — Moteur de calcul GUM + Export LaTeX
 """
 
 import math
+import re
 import warnings
 import sympy as sp
 from scipy import stats as scipy_stats
@@ -153,6 +154,8 @@ def calculate_uncertainty(
       budget          — dict {nom: % de la variance composée}
       partial_derivs  — dict {nom: expression SymPy de ∂f/∂x_i}
     """
+    if not variable_names:
+        raise ValueError("variable_names ne peut pas être vide : un mesurande dépend d'au moins une grandeur.")
     symbols = {name: sp.Symbol(name) for name in variable_names}
     formula = sp.sympify(formula_str, locals=symbols)
     subs = [(symbols[name], nominal_values[name]) for name in variable_names]
@@ -405,6 +408,22 @@ def _mantissa_exp(value: float, sig: int):
     return sign, mantissa, mag
 
 
+def _rename_symbols(expr, variable_names: list[str], sym_map: dict[str, str]):
+    """
+    Renomme les symboles Python d'une expression SymPy par leurs symboles
+    LaTeX (sym_map), en une seule substitution simultanée.
+
+    Une boucle de `.subs()` appliqués un par un serait incorrecte dès que
+    deux variables ont des symboles LaTeX croisés (ex : sym_map = {'x':
+    'y', 'y': 'x'}) : la substitution déjà appliquée pour 'x' serait
+    recapturée par la substitution suivante pour 'y'. `simultaneous=True`
+    applique les deux remplacements en une seule passe et évite la
+    collision.
+    """
+    subs_pairs = [(sp.Symbol(n), sp.Symbol(sym_map[n])) for n in variable_names]
+    return expr.subs(subs_pairs, simultaneous=True)
+
+
 def _latex_ln(expr) -> str:
     """
     Rend une expression SymPy en LaTeX en forçant la notation `\\ln` pour
@@ -434,19 +453,32 @@ def _sci(value: float, sig: int = 2) -> str:
     return _num(value, sig=sig)
 
 
-def _num(value: float, sig: int = 3) -> str:
-    if value == 0:
-        return r"\num{0}"
+def _format_magnitude(value: float, sig: int) -> str:
+    """
+    Formate la magnitude numérique d'une valeur (sans \\num{} ni \\SI{}
+    autour) : notation décimale pour -2 <= magnitude <= 3, notation
+    scientifique mantisse*10^exposant sinon.
+
+    Helper commun à `_num` et `_si`, qui ne diffèrent que par l'habillage
+    final (\\num{} ou \\SI{}{unité}). Avant cette extraction, les deux
+    fonctions dupliquaient le même algorithme d'arrondi/magnitude — la
+    correction de `_sci` (voir commentaire ci-dessus) avait déjà montré
+    qu'une telle duplication finit par se désynchroniser silencieusement.
+    """
     value = round_to_sig_figs(value, sig)
     sign  = "-" if value < 0 else ""
     mag   = math.floor(math.log10(abs(value)))
     if -2 <= mag <= 3:
         decimals = max(0, sig - 1 - mag)
-        val_str  = f"{value:.{decimals}f}"
-    else:
-        _, mantissa, mag = _mantissa_exp(value, sig)
-        val_str = f"{sign}{mantissa:.{sig-1}f}e{mag}"
-    return rf"\num{{{val_str}}}"
+        return f"{value:.{decimals}f}"
+    _, mantissa, mag = _mantissa_exp(value, sig)
+    return f"{sign}{mantissa:.{sig-1}f}e{mag}"
+
+
+def _num(value: float, sig: int = 3) -> str:
+    if value == 0:
+        return r"\num{0}"
+    return rf"\num{{{_format_magnitude(value, sig)}}}"
 
 
 def _si(value: float, unit: str, sig: int = 3) -> str:
@@ -454,22 +486,7 @@ def _si(value: float, unit: str, sig: int = 3) -> str:
         return rf"\SI{{0}}{{{unit}}}" if unit else r"\num{0}"
     if not unit:
         return _num(value, sig=sig)
-    value = round_to_sig_figs(value, sig)
-    sign  = "-" if value < 0 else ""
-    mag   = math.floor(math.log10(abs(value)))
-    if -2 <= mag <= 3:
-        decimals = max(0, sig - 1 - mag)
-        val_str  = f"{value:.{decimals}f}"
-    else:
-        _, mantissa, mag = _mantissa_exp(value, sig)
-        val_str = f"{sign}{mantissa:.{sig-1}f}e{mag}"
-    return rf"\SI{{{val_str}}}{{{unit}}}"
-
-
-def _unit_tex(unit_str: str) -> str:
-    if unit_str:
-        return rf"\,\text{{{unit_str}}}"
-    return ""
+    return rf"\SI{{{_format_magnitude(value, sig)}}}{{{unit}}}"
 
 
 def _format_result_uncertainty(
@@ -531,11 +548,22 @@ def generate_bilan(
     lines.append("")
 
     formula_sympy = sp.sympify(formula_str, locals={n: sp.Symbol(n) for n in variable_names})
-    for n in variable_names:
-        formula_sympy = formula_sympy.subs(sp.Symbol(n), sp.Symbol(sym_map[n]))
+    formula_sympy = _rename_symbols(formula_sympy, variable_names, sym_map)
     formula_latex = _latex_ln(formula_sympy)
 
-    lines.append(rf"\noindent Le mesurande ${measurand_symbol}$ est lié aux grandeurs d'entrée par le modèle :")
+    # measurand_name est rappelé entre parenthèses plutôt qu'inséré comme
+    # sujet de la phrase ("La résistance R est liée..."), pour éviter de
+    # devoir déduire automatiquement le genre grammatical du nom français
+    # (masculin/féminin) et l'accord du participe qui en découlerait. Si
+    # measurand_name n'est pas fourni, ou si l'appelant interne réutilise
+    # le symbole comme nom (cf. full_pipeline_regression_to_measurand), la
+    # parenthèse est omise pour ne pas afficher une redondance du type
+    # "$R$ ($R$)".
+    name_clause = ""
+    if measurand_name and measurand_name.strip().lower() != measurand_symbol.strip().lower():
+        name_clause = f" ({measurand_name})"
+
+    lines.append(rf"\noindent Le mesurande ${measurand_symbol}${name_clause} est lié aux grandeurs d'entrée par le modèle :")
     lines.append(r"\[")
     lines.append(rf"    {measurand_symbol} = {formula_latex}")
     lines.append(r"\]")
@@ -585,7 +613,7 @@ def generate_bilan(
                 rf" = {_si(u_val, unit, sig=global_sig_figs)}"
             )
             lines.append(r"\]")
-        else:
+        elif inp["type"] == "B":
             dist = inp.get("distribution", "uniform")
             if dist == "uniform":
                 a     = inp.get("a", u_val * math.sqrt(3))
@@ -609,6 +637,11 @@ def generate_bilan(
                 lines.append(r"\[")
                 lines.append(rf"    u_B({sym}) = {_si(u_val, unit, sig=global_sig_figs)}")
                 lines.append(r"\]")
+        else:
+            raise ValueError(
+                f"Type d'incertitude inconnu pour la variable '{n}' : {inp['type']!r}. "
+                "Attendu 'exact', 'A' ou 'B' (voir uncertainty_type_* dans la Partie 1)."
+            )
         lines.append("")
 
     lines.append(r"\noindent Les coefficients de sensibilité, évalués aux valeurs nominales, sont :")
@@ -616,8 +649,7 @@ def generate_bilan(
     for n in variable_names:
         ci     = res["sensitivities"][n]
         dp_sym = res["partial_derivs"][n]
-        for nn in variable_names:
-            dp_sym = dp_sym.subs(sp.Symbol(nn), sp.Symbol(sym_map[nn]))
+        dp_sym = _rename_symbols(dp_sym, variable_names, sym_map)
         dp_latex = _latex_ln(dp_sym)
         ci_terms.append(
             rf"c_{{{sym_map[n]}}} = \left.\frac{{\partial {measurand_symbol}}}"
@@ -701,11 +733,18 @@ def generate_bilan(
             ci   = res["sensitivities"][n]
             ui   = uncertainty_inputs[n]["u"]
             nu_i = uncertainty_inputs[n].get("nu", float("inf"))
+            # nu_i (typiquement 1/(2r²) pour une connaissance relative) n'est
+            # généralement pas entier. On tronque par int() plutôt que
+            # d'arrondir au plus proche, par choix délibéré et conservateur :
+            # un nu_i tronqué (donc plus petit) ne peut que réduire nu_eff et
+            # augmenter k, jamais sous-estimer l'incertitude finale. Le
+            # nu_eff global affiché juste au-dessus, lui, est arrondi au plus
+            # proche ({nu_eff:.0f}) car il n'entre dans aucun calcul ultérieur.
             
             if nu_i == float("inf"):
-                nu_lines.append(rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{\infty}}")
+                nu_lines.append(rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{\infty}}")
             else:
-                nu_lines.append(rf"\dfrac{{({_sci(ci)} \cdot {_num(ui)})^4}}{{{int(nu_i)}}}")
+                nu_lines.append(rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{{int(nu_i)}}}")
                 type_str = "type~A" if uncertainty_inputs[n]["type"] == "A" else "type~B"
                 descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {int(nu_i)}$)")
 
@@ -809,6 +848,7 @@ def full_pipeline_regression_to_measurand(
     nominal_values_helpers: dict[str, float],
     uncertainty_inputs_helpers: dict[str, dict],
     measurand_symbol: str,
+    measurand_name: str = "",
     measurand_unit: str = "",
     slope_unit: str = "",
     intercept_unit: str = "",
@@ -841,7 +881,7 @@ def full_pipeline_regression_to_measurand(
     )
 
     tex_gum = generate_bilan(
-        measurand_name=measurand_symbol,
+        measurand_name=measurand_name or measurand_symbol,
         measurand_symbol=measurand_symbol,
         formula_str=formula_str,
         variable_names=variable_names,
@@ -854,6 +894,112 @@ def full_pipeline_regression_to_measurand(
     )
 
     return tex_reg + "\n\n\\clearpage\n\n" + tex_gum
+
+
+# --- Algèbre d'unités siunitx (numérateur/dénominateur), pour diviser
+# proprement une unité y par une unité x sans concaténation textuelle ---
+
+_SI_PREFIX_TOKENS = {
+    r"\quecto", r"\ronto", r"\yocto", r"\zepto", r"\atto", r"\femto",
+    r"\pico", r"\nano", r"\micro", r"\milli", r"\centi", r"\deci",
+    r"\deca", r"\hecto", r"\kilo", r"\mega", r"\giga", r"\tera",
+    r"\peta", r"\exa", r"\zetta", r"\yotta",
+}
+_SI_POWER_TOKENS = {r"\square": 2, r"\cubic": 3}
+_SI_PER = r"\per"
+
+
+def _parse_unit(unit_str: str) -> tuple[list, list]:
+    """
+    Découpe une unité siunitx en deux listes [nom, puissance] : numérateur
+    (avant \\per) et dénominateur (après \\per). Les préfixes (\\kilo,
+    \\milli...) sont rattachés au token d'unité qui suit pour former un
+    seul nom (ex: \\kilo\\gram -> "\\kilo\\gram"), et les modificateurs de
+    puissance (\\square, \\cubic) sont convertis en exposant entier.
+    """
+    tokens = re.findall(r"\\[A-Za-z]+", unit_str or "")
+    numerator, denominator = [], []
+    current = numerator
+    pending_prefix, pending_power = "", 1
+    for t in tokens:
+        if t == _SI_PER:
+            current = denominator
+            continue
+        if t in _SI_PREFIX_TOKENS:
+            pending_prefix += t
+            continue
+        if t in _SI_POWER_TOKENS:
+            pending_power = _SI_POWER_TOKENS[t]
+            continue
+        current.append([pending_prefix + t, pending_power])
+        pending_prefix, pending_power = "", 1
+    return numerator, denominator
+
+
+def _merge_same_units(unit_list: list) -> list:
+    """Additionne les puissances des occurrences répétées d'un même nom."""
+    powers, order = {}, []
+    for name, power in unit_list:
+        if name not in powers:
+            order.append(name)
+            powers[name] = 0
+        powers[name] += power
+    return [[name, powers[name]] for name in order if powers[name] != 0]
+
+
+def _cancel_units(numerator: list, denominator: list) -> tuple[list, list]:
+    """Simplifie les unités communes au numérateur et au dénominateur."""
+    num, den = dict(numerator), dict(denominator)
+    for name in list(num):
+        if name in den:
+            shared      = min(num[name], den[name])
+            num[name]  -= shared
+            den[name]  -= shared
+    return (
+        [[n, p] for n, p in num.items() if p != 0],
+        [[n, p] for n, p in den.items() if p != 0],
+    )
+
+
+def _render_unit_list(unit_list: list) -> str:
+    parts = []
+    for name, power in unit_list:
+        if power == 1:
+            parts.append(name)
+        elif power == 2:
+            parts.append(r"\square" + name)
+        elif power == 3:
+            parts.append(r"\cubic" + name)
+        elif power != 0:
+            parts.append(name + rf"\tothe{{{power}}}")
+    return "".join(parts)
+
+
+def _divide_units(numerator_unit: str, denominator_unit: str) -> str:
+    """
+    Construit l'unité siunitx du quotient numerator_unit / denominator_unit
+    par une véritable algèbre numérateur/dénominateur, au lieu d'une simple
+    concaténation textuelle "y_unit\\per{x_unit}".
+
+    La concaténation textuelle échoue dès que numerator_unit contient déjà
+    un \\per : diviser \\meter\\per\\second (une vitesse) par \\second (un
+    temps) donnait auparavant \\meter\\per\\second\\per\\second, qui compile
+    sans erreur mais s'affiche "m/(s s)" au lieu de "m/s²". Cette fonction
+    traite chaque unité comme une paire (numérateur, dénominateur), combine
+    les deux quotients, fusionne les puissances d'un même nom et simplifie
+    les unités communes, avant de reconstruire la chaîne siunitx finale
+    (ex: \\meter\\per\\square\\second).
+    """
+    num_y, den_y = _parse_unit(numerator_unit)
+    num_x, den_x = _parse_unit(denominator_unit)
+    combined_num = _merge_same_units(num_y + den_x)
+    combined_den = _merge_same_units(den_y + num_x)
+    combined_num, combined_den = _cancel_units(combined_num, combined_den)
+    num_str = _render_unit_list(combined_num)
+    den_str = _render_unit_list(combined_den)
+    if den_str:
+        return (num_str + _SI_PER + den_str) if num_str else (_SI_PER + den_str)
+    return num_str
 
 
 def generate_bilan_regression(
@@ -873,9 +1019,7 @@ def generate_bilan_regression(
     reg   = _reg_precomputed if _reg_precomputed is not None else linear_regression(x_data, y_data)
     lines = []
 
-    s_unit = slope_unit if slope_unit else (
-        rf"{y_unit}\per{x_unit}" if x_unit and y_unit else ""
-    )
+    s_unit = slope_unit if slope_unit else _divide_units(y_unit, x_unit)
     i_unit = intercept_unit if intercept_unit else y_unit
 
     lines.append(rf"\subsection{{Bilan --- {subsection_title}}}")

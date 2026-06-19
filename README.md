@@ -36,15 +36,15 @@ gum-calc/
 Le notebook template sert de référence, qui peut être adaptée pour chaque problème.
 Pour chaque TP, on duplique le notebook template et on remplit une cellule par mesurande. Chaque cellule suit la même structure :
 
-**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi uncertainty_type_A (répétition de mesures), uncertainty_type_B_from_resolution (résolution d'instrument), uncertainty_type_B_uniform (distribution uniforme connue), uncertainty_type_B_relative (incertitude déjà connue, par calibration ou propagée) et uncertainty_type_exact (constante).
+**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi `uncertainty_type_A` (répétition de mesures), `uncertainty_type_B_from_resolution` (résolution d'instrument), `uncertainty_type_B_uniform` (distribution uniforme connue), `uncertainty_type_B_relative` (incertitude déjà connue, par calibration ou propagée) et `uncertainty_type_exact` (constante).
 
-**Calcul GUM :** full_gum_analysis prend la formule du mesurande (en SymPy), les valeurs nominales et les incertitudes d'entrée, et renvoie le résultat propagé, l'incertitude composée uc, le facteur d'élargissement k (via Welch-Satterthwaite si nécessaire), l'incertitude élargie U, et le budget d'incertitudes.
+**Calcul GUM :** `full_gum_analysis` prend la formule du mesurande (en SymPy), les valeurs nominales et les incertitudes d'entrée, et renvoie le résultat propagé, l'incertitude composée `uc`, le facteur d'élargissement `k` (via Welch-Satterthwaite si nécessaire), l'incertitude élargie `U`, et le budget d'incertitudes.
 
-**Génération du bilan :** generate_bilan produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes-types détaillées, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
+**Génération du bilan :** `generate_bilan` produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes-types détaillées, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
 
-**Export final :** generate_annexe assemble tous les bilans générés dans le notebook en une seule section LaTeX \section{Annexe : Bilans d'incertitudes}, à coller directement dans Overleaf.
+**Export final :** `generate_annexe` assemble tous les bilans générés dans le notebook en une seule section LaTeX `\section{Annexe : Bilans d'incertitudes}`, à coller directement dans Overleaf.
 
-**Toute modification du moteur de calcul (formules, arrondis, format LaTeX) se fait exclusivement dans gum_calc.py, jamais dans le notebook.**
+**Toute modification du moteur de calcul (formules, arrondis, format LaTeX) se fait exclusivement dans `gum_calc.py`, jamais dans le notebook.**
 
 ---
 
@@ -54,7 +54,7 @@ Bibliothèques utilisées :
 
 - `sympy` — dérivation symbolique des coefficients de sensibilité
 - `scipy` — table de Student pour le facteur d'élargissement (Welch-Satterthwaite)
-- `math` — calculs numériques de base (bibliothèque standard Python, pas d'installation requise)
+- `math` et `re` — calculs numériques et parsing d'unités (bibliothèques standard Python)
 - `jupyter` — environnement d'exécution du notebook template
 
 Installation des dépendances :
@@ -78,7 +78,7 @@ sys.path.insert(0, r"C:\chemin\vers\gum-calc")
 
 ## Étape 1 — Déclarer les incertitudes
 
-Avant de calculer quoi que ce soit, on caractérise chaque grandeur d'entrée par son incertitude-type. `gum_calc.py` propose cinq fonctions selon la situation.
+Avant de calculer quoi que ce soit, on caractérise chaque grandeur d'entrée par son incertitude-type. `gum_calc.py` propose cinq fonctions selon la situation. Les types valides reconnus par l'export LaTeX sont `"exact"`, `"A"` et `"B"` — tout autre type lève une `ValueError` explicite.
 
 ---
 
@@ -183,7 +183,7 @@ res = full_gum_analysis(
 | Paramètre | Description |
 |---|---|
 | `formula_str` | Expression SymPy du mesurande — `*` pour la multiplication, `**` pour la puissance, `sqrt()`, `log()`, `sin()`, etc. |
-| `variable_names` | Liste ordonnée des noms de variables — doit être identique aux clés de `nominal_values` et `uncertainty_inputs` |
+| `variable_names` | Liste ordonnée des noms de variables — doit être identique aux clés de `nominal_values` et `uncertainty_inputs`. Ne peut pas être vide. |
 | `nominal_values` | Dict `{nom: valeur nominale}` |
 | `uncertainty_inputs` | Dict `{nom: dict uncertainty_type_*}` |
 | `k_override` | Facteur k forcé (optionnel) — si absent, Welch-Satterthwaite détermine k automatiquement |
@@ -221,7 +221,7 @@ bilan = generate_bilan(
 
 | Paramètre | Description |
 |---|---|
-| `measurand_name` | Nom en toutes lettres — utilisé dans la phrase d'introduction du bilan |
+| `measurand_name` | Nom en toutes lettres du mesurande — affiché entre parenthèses après le symbole dans la phrase d'introduction (ex : « Le mesurande $R$ (Résistance) est lié… »). Ignoré si identique à `measurand_symbol`. |
 | `measurand_symbol` | Symbole LaTeX du mesurande |
 | `formula_str` | Même expression que dans `full_gum_analysis` |
 | `variable_names` | Même liste que dans `full_gum_analysis` |
@@ -254,6 +254,8 @@ print(generate_annexe([bilan_1, bilan_2, ...]))
 
 Quand on veut caractériser une droite expérimentale sans en dériver un autre mesurande. Le modèle est y = θ₀ + θ₁·x. Le bilan inclut les estimateurs, leurs incertitudes-types dérivées de la variance résiduelle, et le coefficient r².
 
+L'unité de la pente est déduite automatiquement par algèbre de `y_unit / x_unit` — par exemple `\meter\per\second` divisé par `\second` donne `\meter\per\square\second`. On peut la surcharger explicitement via `slope_unit` si nécessaire.
+
 ```python
 bilan_reg = generate_bilan_regression(
     x_symbol         = "...",
@@ -263,8 +265,8 @@ bilan_reg = generate_bilan_regression(
     x_data           = [...],
     y_data           = [...],
     subsection_title = "...",
-    slope_unit       = r"...",
-    intercept_unit   = r"...",
+    slope_unit       = r"...",    # optionnel — déduit de y_unit/x_unit si absent
+    intercept_unit   = r"...",    # optionnel — égal à y_unit si absent
     slope_symbol     = r"\theta_1",
     intercept_symbol = r"\theta_0",
 )
@@ -291,6 +293,7 @@ latex = full_pipeline_regression_to_measurand(
     nominal_values_helpers     = {...},
     uncertainty_inputs_helpers = {...},
     measurand_symbol           = "...",
+    measurand_name             = "...",   # optionnel — affiché entre parenthèses dans le bilan GUM
     measurand_unit             = r"...",
     slope_symbol               = r"\theta_1",
     intercept_symbol           = r"\theta_0",
