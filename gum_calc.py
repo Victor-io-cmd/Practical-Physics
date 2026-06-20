@@ -1,5 +1,6 @@
 """
 gum_calc.py — Moteur de calcul GUM + Export LaTeX
+
 """
 
 import math
@@ -321,12 +322,22 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
 
 
 def round_to_sig_figs(value: float, sig_figs: int) -> float:
-    """Arrondit value à sig_figs chiffres significatifs."""
+    """
+    Arrondit value à sig_figs chiffres significatifs, selon la convention
+    "moitié vers le haut" (symétrique en signe) — la même que celle
+    implémentée à la main dans `format_result` pour le résultat encadré
+    final. Le `round()` natif de Python applique le round-half-to-even
+    ("banker's rounding") : sur une coïncidence pile à la moitié, les deux
+    fonctions divergeraient sur le dernier chiffre affiché d'une même
+    grandeur selon le chemin de code emprunté.
+    """
     if value == 0:
         return 0.0
     magnitude = math.floor(math.log10(abs(value)))
     factor    = 10 ** (sig_figs - 1 - magnitude)
-    return round(value * factor) / factor
+    if value >= 0:
+        return math.floor(value * factor + 0.5) / factor
+    return -math.floor(-value * factor + 0.5) / factor
 
 
 def format_result(result: float, U: float, sig_figs_exact: int = 4) -> dict:
@@ -366,9 +377,18 @@ def full_gum_analysis(
     nominal_values: dict[str, float],
     uncertainty_inputs: dict[str, dict],
     k_override: float = None,
+    global_sig_figs: int = 4,
 ) -> dict:
     """
     Pipeline GUM complet : propagation + Welch-Satterthwaite + formatage.
+
+    `global_sig_figs` ne pilote que le cas particulier où toutes les
+    grandeurs d'entrée sont exactes (U = 0, voir `format_result`) : c'est
+    le seul cas où le nombre de chiffres significatifs du résultat n'est
+    pas dicté par l'incertitude elle-même. Le défaut (4) préserve le
+    comportement historique pour tout appel direct de cette fonction hors
+    de `generate_bilan` ; ce dernier transmet son propre `global_sig_figs`
+    pour rester cohérent avec le reste du bilan affiché.
     """
     calc = calculate_uncertainty(
         formula_str, variable_names, nominal_values, uncertainty_inputs
@@ -381,7 +401,7 @@ def full_gum_analysis(
     )
     k         = k_override if k_override is not None else ws["k"]
     U         = expanded_uncertainty(calc["uc"], k)
-    formatted = format_result(calc["result"], U)
+    formatted = format_result(calc["result"], U, sig_figs_exact=global_sig_figs)
 
     return {
         **calc,
@@ -398,13 +418,41 @@ def full_gum_analysis(
 # PARTIE 2 — EXPORT LATEX
 # ============================================================
 
+# --- Seuils de mise en forme centralisés : toute évolution future de
+# l'un de ces seuils ne doit être faite qu'ici, pour ne pas les faire
+# diverger silencieusement entre les différentes fonctions qui les
+# utilisent. ---
+_SCI_NOTATION_MAG_MIN = -2   # en dessous : notation scientifique
+_SCI_NOTATION_MAG_MAX = 3    # au-dessus  : notation scientifique
+_INLINE_MAX_CHARS     = 70   # au-delà : \boxed{...} bascule en \begin{array}
+_ALIGN_MAX_CHARS      = 90   # au-delà : ligne unique \[ \] bascule en align*
+_ALIGN_MAX_TERMS      = 3    # à partir de : bascule en align* (même sans dépasser la longueur)
+
 def _mantissa_exp(value: float, sig: int):
-    sign     = "-" if value < 0 else ""
-    mag      = math.floor(math.log10(abs(value)))
-    mantissa = round(abs(value) / (10 ** mag), sig - 1)
-    if mantissa >= 10:
-        mantissa /= 10
+    """
+    Décompose value en (signe, mantisse, exposant) pour la notation
+    scientifique mantisse * 10^exposant, avec mantisse dans [1, 10).
+
+    Une seule décision d'arrondi "physique" est appliquée
+    (round_to_sig_figs) ; la division par 10**mag qui suit n'est qu'une
+    simple lecture de cette valeur déjà arrondie, pour éviter tout double
+    arrondi en cascade avec deux conventions différentes.
+    """
+    if value == 0:
+        return "", 0.0, 0
+    rounded  = round_to_sig_figs(value, sig)
+    sign     = "-" if rounded < 0 else ""
+    mag      = math.floor(math.log10(abs(rounded)))
+    mantissa = abs(rounded) / (10 ** mag)
+    # Garde-fou « retenue » : un arrondi peut faire passer la mantisse à
+    # 10.000 pile (ex: 9.996 arrondi à 3 c.s. -> 10.0), ce qui violerait
+    # la convention [1, 10) de la notation scientifique. On vérifie sur
+    # la mantisse déjà formatée à sig-1 décimales (et non sur la valeur
+    # flottante brute, sujette au bruit de représentation binaire) avant
+    # de décider de la retenue.
+    if round(mantissa, sig - 1) >= 10:
         mag      += 1
+        mantissa  = abs(rounded) / (10 ** mag)
     return sign, mantissa, mag
 
 
@@ -430,13 +478,13 @@ def _latex_ln(expr) -> str:
     le logarithme népérien.
 
     `sympy.log(x)` est le logarithme népérien, mais son rendu LaTeX par
-    défaut est `\\log` (sans base explicite), ce qui peut induire en erreur
-    un lecteur habitué à la convention « log = base 10, ln = base e ».
-    Vérifié empiriquement : même `sympy.log(x, 10)` (base explicite) est
-    décomposé en interne par SymPy en `log(x)/log(10)` — il n'existe pas
-    de forme `\\log_{10}{...}` produite par le printer LaTeX de SymPy.
-    La substitution globale `\\log{` -> `\\ln{` est donc sans risque de
-    faux positif sur une base explicite.
+    défaut est `\\log` (sans base explicite), ce qui peut induire en
+    erreur un lecteur habitué à la convention « log = base 10, ln = base
+    e ». Même `sympy.log(x, 10)` (base explicite) est décomposé en
+    interne par SymPy en `log(x)/log(10)` — il n'existe pas de forme
+    `\\log_{10}{...}` produite par le printer LaTeX de SymPy. La
+    substitution globale `\\log{` -> `\\ln{` est donc sans risque de faux
+    positif sur une base explicite.
     """
     return sp.latex(expr).replace(r"\log{", r"\ln{")
 
@@ -444,11 +492,7 @@ def _latex_ln(expr) -> str:
 def _sci(value: float, sig: int = 2) -> str:
     """
     Alias historique conservé pour compatibilité d'appel : délègue
-    entièrement à `_num`. Auparavant `_sci` retournait une chaîne brute
-    (jamais encapsulée dans `\\num{}`), ce qui produisait un séparateur
-    décimal point au lieu de virgule quel que soit le réglage de locale —
-    notamment pour tous les coefficients de sensibilité. La délégation à
-    `_num` corrige ce point sans dupliquer la logique de formatage.
+    entièrement à `_num`.
     """
     return _num(value, sig=sig)
 
@@ -460,15 +504,12 @@ def _format_magnitude(value: float, sig: int) -> str:
     scientifique mantisse*10^exposant sinon.
 
     Helper commun à `_num` et `_si`, qui ne diffèrent que par l'habillage
-    final (\\num{} ou \\SI{}{unité}). Avant cette extraction, les deux
-    fonctions dupliquaient le même algorithme d'arrondi/magnitude — la
-    correction de `_sci` (voir commentaire ci-dessus) avait déjà montré
-    qu'une telle duplication finit par se désynchroniser silencieusement.
+    final (\\num{} ou \\SI{}{unité}).
     """
     value = round_to_sig_figs(value, sig)
     sign  = "-" if value < 0 else ""
     mag   = math.floor(math.log10(abs(value)))
-    if -2 <= mag <= 3:
+    if _SCI_NOTATION_MAG_MIN <= mag <= _SCI_NOTATION_MAG_MAX:
         decimals = max(0, sig - 1 - mag)
         return f"{value:.{decimals}f}"
     _, mantissa, mag = _mantissa_exp(value, sig)
@@ -492,31 +533,101 @@ def _si(value: float, unit: str, sig: int = 3) -> str:
 def _format_result_uncertainty(
     result_rounded: float,
     U_rounded: float,
-    decimals: int,
     unit: str,
     sig_figs_exact: int = 4,
 ) -> str:
+    """
+    Construit la chaîne LaTeX siunitx "valeur +- incertitude" finale pour
+    un résultat encadré.
+
+    Le nombre de décimales nécessaire est intégralement recalculé ici, à
+    partir de U_rounded seul, qui est la seule source de vérité réellement
+    utile (U_rounded porte par construction exactement 2 chiffres
+    significatifs, cf. round_to_sig_figs(U, 2) dans format_result).
+    """
     if U_rounded == 0:
+        # Cas "incertitude pure" : toutes les grandeurs d'entrée sont
+        # exactes. On arrondit alors le résultat seul à sig_figs_exact
+        # chiffres significatifs, sans tentative de log10(0).
         val = round_to_sig_figs(result_rounded, sig_figs_exact) if result_rounded != 0 else 0.0
         return _si(val, unit, sig=sig_figs_exact) if unit else _num(val, sig=sig_figs_exact)
 
-    mag_result = math.floor(math.log10(abs(result_rounded))) if result_rounded != 0 else 0
+    # --- Magnitude de l'incertitude, seule grandeur qui pilote le nombre
+    # de décimales (directive métrologique : c'est U, jamais le résultat,
+    # qui impose le nombre de décimales affichées). ---
+    mag_U = math.floor(math.log10(abs(U_rounded)))
 
-    if -2 <= mag_result <= 3:
-        d       = max(0, decimals)
+    # Le résultat peut s'arrondir exactement à 0 (mesure compatible avec
+    # zéro, situation expérimentale parfaitement normale) sans que U le
+    # soit : log10(0) n'existe pas. On bascule alors la magnitude de
+    # référence du résultat sur celle de U_rounded.
+    mag_result = math.floor(math.log10(abs(result_rounded))) if result_rounded != 0 else mag_U
+
+    # decimals_raw : nombre de décimales nécessaires pour afficher les 2
+    # chiffres significatifs de U_rounded à l'échelle 1 (non mise à
+    # l'échelle). Peut être négatif si mag_U est grand (U >= 10 en valeur
+    # absolue) : c'est géré explicitement ici, jamais transmis tel quel à
+    # un format f"{x:.{d}f}" qui lèverait ValueError.
+    decimals_raw = 1 - mag_U
+
+    # --- Choix de l'échelle d'affichage commune ---
+    # Par défaut, on cale l'affichage sur la magnitude du résultat (le
+    # plus lisible : c'est la grandeur d'intérêt). Mais si l'incertitude
+    # dépasse le résultat de plus d'une décade (mesure très peu précise,
+    # résultat "noyé" dans son incertitude), caler l'échelle sur le
+    # résultat forcerait à tronquer les chiffres significatifs de U via
+    # le clamp max(0, ...) — silencieusement, sans avertissement. On
+    # bascule alors la référence sur mag_U : même logique physique que le
+    # cas result_rounded == 0 ci-dessus, généralisée à un seuil d'une
+    # décade d'écart.
+    anchor_on_result = (mag_result - mag_U) >= -1
+    ref_mag = mag_result if anchor_on_result else mag_U
+
+    if _SCI_NOTATION_MAG_MIN <= ref_mag <= _SCI_NOTATION_MAG_MAX:
+        # --- Notation décimale simple (pas de mise à l'échelle) ---
+        # decimals_raw seul pilote d : aucune perte possible des 2 c.s.
+        # de U ici, le clamp à 0 ne fait que renoncer à des décimales
+        # superflues pour le résultat si celui-ci est, à raison, noyé
+        # dans son incertitude (cf. exemple "0.00 +- 0.12").
+        d       = max(0, decimals_raw)
         val_str = f"{result_rounded:.{d}f}"
         u_str   = f"{U_rounded:.{d}f}"
         body    = rf"{val_str} +- {u_str}"
     else:
-        d       = max(0, decimals + mag_result)
-        scale   = 10 ** mag_result
-        val_str = f"{result_rounded / scale:.{d}f}"
-        u_str   = f"{U_rounded / scale:.{d}f}"
-        body    = rf"{val_str} +- {u_str} e{mag_result}"
+        # --- Notation scientifique, échelle commune 10^ref_mag ---
+        d     = max(0, decimals_raw + ref_mag)
+        scale = 10 ** ref_mag
+        val_scaled = result_rounded / scale
+        u_scaled   = U_rounded / scale
 
+        # Garde-fou « retenue », symétrique de celui de _mantissa_exp : un
+        # arrondi à d décimales peut faire passer la mantisse de l'ancre
+        # (celle qui a défini ref_mag, donc censée rester dans [1, 10)) à
+        # 10.000 pile. Seule l'ancre est vérifiée : l'autre grandeur n'a,
+        # elle, aucune raison de rester dans [1,10).
+        anchor_scaled = val_scaled if anchor_on_result else u_scaled
+        if round(anchor_scaled, d) >= 10:
+            ref_mag   += 1
+            scale      = 10 ** ref_mag
+            d          = max(0, decimals_raw + ref_mag)
+            val_scaled = result_rounded / scale
+            u_scaled   = U_rounded / scale
+
+        val_str = f"{val_scaled:.{d}f}"
+        u_str   = f"{u_scaled:.{d}f}"
+        body    = rf"{val_str} +- {u_str} e{ref_mag}"
+
+    # separate-uncertainty=true est ajouté en option LOCALE de la macro,
+    # plutôt que de dépendre d'un \sisetup global supposé présent dans le
+    # document hôte. Sans cette option (locale ou globale), siunitx
+    # affiche par défaut l'incertitude au format compact
+    # valeur(incertitude) — ex. "1,382(70)e-29" — qui est un comportement
+    # documenté de siunitx, mais qui n'est pas le rendu attendu ici.
+    # L'option locale rend ce \SI{}/\num{} autosuffisant : il reste
+    # correct même collé isolément hors du gabarit TP.
     if unit:
-        return rf"\SI{{{body}}}{{{unit}}}"
-    return rf"\num{{{body}}}"
+        return rf"\SI[separate-uncertainty=true]{{{body}}}{{{unit}}}"
+    return rf"\num[separate-uncertainty=true]{{{body}}}"
 
 
 def generate_bilan(
@@ -536,8 +647,17 @@ def generate_bilan(
     """
     Génère le bloc LaTeX complet du bilan d'incertitudes pour un mesurande.
     """
+    for n in variable_names:
+        t = uncertainty_inputs[n]["type"]
+        if t not in ("exact", "A", "B"):
+            raise ValueError(
+                f"Type d'incertitude inconnu pour la variable '{n}' : {t!r}. "
+                "Attendu 'exact', 'A' ou 'B' (voir uncertainty_type_* dans la Partie 1 du README)."
+            )
+
     res      = full_gum_analysis(
-        formula_str, variable_names, nominal_values, uncertainty_inputs, k_override
+        formula_str, variable_names, nominal_values, uncertainty_inputs, k_override,
+        global_sig_figs=global_sig_figs,
     )
     sym_map  = {n: variable_symbols.get(n, n) for n in variable_names}
     unit_map = {n: variable_units.get(n, "")  for n in variable_names}
@@ -556,9 +676,8 @@ def generate_bilan(
     # devoir déduire automatiquement le genre grammatical du nom français
     # (masculin/féminin) et l'accord du participe qui en découlerait. Si
     # measurand_name n'est pas fourni, ou si l'appelant interne réutilise
-    # le symbole comme nom (cf. full_pipeline_regression_to_measurand), la
-    # parenthèse est omise pour ne pas afficher une redondance du type
-    # "$R$ ($R$)".
+    # le symbole comme nom, la parenthèse est omise pour ne pas afficher
+    # une redondance du type "$R$ ($R$)".
     name_clause = ""
     if measurand_name and measurand_name.strip().lower() != measurand_symbol.strip().lower():
         name_clause = f" ({measurand_name})"
@@ -637,11 +756,6 @@ def generate_bilan(
                 lines.append(r"\[")
                 lines.append(rf"    u_B({sym}) = {_si(u_val, unit, sig=global_sig_figs)}")
                 lines.append(r"\]")
-        else:
-            raise ValueError(
-                f"Type d'incertitude inconnu pour la variable '{n}' : {inp['type']!r}. "
-                "Attendu 'exact', 'A' ou 'B' (voir uncertainty_type_* dans la Partie 1)."
-            )
         lines.append("")
 
     lines.append(r"\noindent Les coefficients de sensibilité, évalués aux valeurs nominales, sont :")
@@ -658,7 +772,7 @@ def generate_bilan(
         )
 
     ci_line = r"\qquad ".join(ci_terms)
-    if len(ci_terms) > 3 or len(ci_line) > 90:
+    if len(ci_terms) > _ALIGN_MAX_TERMS or len(ci_line) > _ALIGN_MAX_CHARS:
         lines.append(r"\begin{align*}")
         for i, term in enumerate(ci_terms):
             suffix = r" \\" if i < len(ci_terms) - 1 else ""
@@ -693,7 +807,7 @@ def generate_bilan(
         radicand   = " + ".join(inner_terms)
         result_str = _si(uc, measurand_unit, sig=global_sig_figs)
 
-        if len(inner_terms) > 1 and (len(radicand) > 70 or len(inner_terms) >= 3):
+        if len(inner_terms) > 1 and (len(radicand) > _ALIGN_MAX_CHARS or len(inner_terms) >= _ALIGN_MAX_TERMS):
             S_val = uc ** 2
             n_terms = len(inner_terms)
             n_lines = math.ceil(n_terms / 3)
@@ -733,20 +847,31 @@ def generate_bilan(
             ci   = res["sensitivities"][n]
             ui   = uncertainty_inputs[n]["u"]
             nu_i = uncertainty_inputs[n].get("nu", float("inf"))
-            # nu_i (typiquement 1/(2r²) pour une connaissance relative) n'est
-            # généralement pas entier. On tronque par int() plutôt que
-            # d'arrondir au plus proche, par choix délibéré et conservateur :
-            # un nu_i tronqué (donc plus petit) ne peut que réduire nu_eff et
-            # augmenter k, jamais sous-estimer l'incertitude finale. Le
-            # nu_eff global affiché juste au-dessus, lui, est arrondi au plus
-            # proche ({nu_eff:.0f}) car il n'entre dans aucun calcul ultérieur.
-            
-            if nu_i == float("inf"):
-                nu_lines.append(rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{\infty}}")
-            else:
-                nu_lines.append(rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{{int(nu_i)}}}")
-                type_str = "type~A" if uncertainty_inputs[n]["type"] == "A" else "type~B"
-                descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {int(nu_i)}$)")
+            # nu_i (typiquement 1/(2r²) pour une connaissance relative)
+            # n'est généralement pas entier. On tronque par int() plutôt
+            # que d'arrondir au plus proche, par choix délibéré et
+            # conservateur : un nu_i tronqué (donc plus petit) ne peut que
+            # réduire nu_eff et augmenter k, jamais sous-estimer
+            # l'incertitude finale. Le nu_eff global affiché juste
+            # au-dessus, lui, est arrondi au plus proche ({nu_eff:.0f})
+            # car il n'entre dans aucun calcul ultérieur.
+
+            # Une composante à degrés de liberté infinis (type B
+            # classique) contribue un terme divisé par l'infini, donc nul,
+            # au dénominateur : on ne l'affiche pas dans la formule, afin
+            # que celle-ci porte exactement sur le même ensemble de
+            # variables que la phrase introductive ci-dessous (qui ne
+            # nomme que les variables à nu fini). De même, une variable à
+            # sensibilité nulle au point nominal (abs(ci*ui) == 0) ne
+            # contribue pas réellement au calcul de nu_eff : le critère
+            # ci-dessous reproduit exactement celui de
+            # welch_satterthwaite, pour que ce qui est montré corresponde
+            # à ce qui est calculé.
+            if nu_i == float("inf") or abs(ci * ui) == 0:
+                continue
+            nu_lines.append(rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{{int(nu_i)}}}")
+            type_str = "type~A" if uncertainty_inputs[n]["type"] == "A" else "type~B"
+            descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {int(nu_i)}$)")
 
         desc_str = ", ".join(descriptions[:-1]) + " et " + descriptions[-1] if len(descriptions) > 1 else descriptions[0]
         lines.append(
@@ -796,7 +921,7 @@ def generate_bilan(
                 rf"\frac{{c_{{{sym_map[n]}}}^2\,u^2({sym_map[n]})}}{{u_c^2({measurand_symbol})}} = \num{{{pct:.1f}}}\,\%"
             )
         budget_line = r"\qquad ".join(budget_terms)
-        if len(budget_terms) > 3 or len(budget_line) > 90:
+        if len(budget_terms) > _ALIGN_MAX_TERMS or len(budget_line) > _ALIGN_MAX_CHARS:
             lines.append(r"\begin{align*}")
             for i, term in enumerate(budget_terms):
                 suffix = r" \\" if i < len(budget_terms) - 1 else ""
@@ -816,15 +941,29 @@ def generate_bilan(
     lines.append("")
 
     lines.append(r"\noindent Le résultat final s'écrit :")
-    lines.append(r"\[")
     final_expr = _format_result_uncertainty(
         result_rounded=res['result_rounded'],
         U_rounded=res['U_rounded'],
-        decimals=res['decimals'],
         unit=measurand_unit,
         sig_figs_exact=global_sig_figs
     )
-    lines.append(rf"    \boxed{{{measurand_symbol} = {final_expr}}}")
+    box_inline = rf"{measurand_symbol} = {final_expr}"
+
+    lines.append(r"\[")
+    if len(box_inline) > _INLINE_MAX_CHARS:
+        # Un \boxed{} ne contient nativement qu'une seule ligne de display
+        # math, ce qui déborde dès qu'un symbole personnalisé long se
+        # combine à une unité composée et un résultat encadré complet. On
+        # imbrique alors un environnement array pour conserver
+        # l'encadrement sur plusieurs lignes.
+        lines.append(r"    \boxed{")
+        lines.append(r"    \begin{array}{c}")
+        lines.append(rf"    {measurand_symbol} \\[4pt]")
+        lines.append(rf"    {{}} = {final_expr}")
+        lines.append(r"    \end{array}")
+        lines.append(r"    }")
+    else:
+        lines.append(rf"    \boxed{{{box_inline}}}")
     lines.append(r"\]")
 
     return "\n".join(lines)
@@ -907,6 +1046,7 @@ _SI_PREFIX_TOKENS = {
 }
 _SI_POWER_TOKENS = {r"\square": 2, r"\cubic": 3}
 _SI_PER = r"\per"
+_SI_TOTHE_RE = re.compile(r"^\\tothe\{(-?\d+)\}$")
 
 
 def _parse_unit(unit_str: str) -> tuple[list, list]:
@@ -914,10 +1054,30 @@ def _parse_unit(unit_str: str) -> tuple[list, list]:
     Découpe une unité siunitx en deux listes [nom, puissance] : numérateur
     (avant \\per) et dénominateur (après \\per). Les préfixes (\\kilo,
     \\milli...) sont rattachés au token d'unité qui suit pour former un
-    seul nom (ex: \\kilo\\gram -> "\\kilo\\gram"), et les modificateurs de
-    puissance (\\square, \\cubic) sont convertis en exposant entier.
+    seul nom (ex: \\kilo\\gram -> "\\kilo\\gram"), les modificateurs de
+    puissance préfixes (\\square, \\cubic) sont convertis en exposant
+    entier, et le modificateur postfixe \\tothe{n} (puissance >= 4) vient
+    corriger la puissance du dernier nom d'unité déjà ajouté à la liste
+    courante, puisqu'il s'écrit après l'unité qu'il modifie (ex:
+    \\second\\tothe{4}) et non avant comme \\square/\\cubic.
+
+    La regex capture explicitement le bloc `{n}` qui suit \\tothe, y
+    compris lorsque n est négatif (\\tothe{-2}) : sans cela, un nombre
+    entre accolades serait silencieusement perdu et \\tothe réapparaîtrait
+    comme un nom d'unité orphelin — ce qui casse la compilation dès
+    qu'une unité de puissance >= 4 (positive OU négative, ex: une unité
+    déjà inversée par un appel précédent) est réinjectée dans un nouvel
+    appel à `_divide_units` (chaîne de mesurandes).
+
+    Limite documentée (non corrigée) : cette algèbre est purement
+    symbolique sur le nom du token. \\kilo\\gram et \\gram sont deux clés
+    différentes : aucune conversion numérique entre préfixes SI d'une même
+    unité de base n'est effectuée. Une unité composée du type
+    \\kilo\\gram\\per\\gram peut donc apparaître non simplifiée si le
+    numérateur et le dénominateur emploient des préfixes différents pour
+    la même grandeur — sans erreur ni avertissement.
     """
-    tokens = re.findall(r"\\[A-Za-z]+", unit_str or "")
+    tokens = re.findall(r"\\[A-Za-z]+(?:\{-?\d+\})?", unit_str or "")
     numerator, denominator = [], []
     current = numerator
     pending_prefix, pending_power = "", 1
@@ -930,6 +1090,11 @@ def _parse_unit(unit_str: str) -> tuple[list, list]:
             continue
         if t in _SI_POWER_TOKENS:
             pending_power = _SI_POWER_TOKENS[t]
+            continue
+        m = _SI_TOTHE_RE.match(t)
+        if m:
+            if current:
+                current[-1][1] = int(m.group(1))
             continue
         current.append([pending_prefix + t, pending_power])
         pending_prefix, pending_power = "", 1
@@ -961,6 +1126,36 @@ def _cancel_units(numerator: list, denominator: list) -> tuple[list, list]:
     )
 
 
+def _normalize_unit_signs(numerator: list, denominator: list) -> tuple[list, list]:
+    """
+    Renvoie (numérateur, dénominateur) avec des puissances strictement
+    positives, en basculant côté dénominateur toute unité dont la
+    puissance serait négative côté numérateur, et réciproquement.
+
+    Une unité réinjectée avec un exposant négatif explicite (\\tothe{-2})
+    peut être reconnue par `_parse_unit`, mais se retrouve alors dans la
+    liste "numérateur" avec une puissance négative. `_render_unit_list`
+    saurait techniquement l'afficher tel quel (\\tothe{-2} compile très
+    bien), mais le résultat serait stylistiquement incohérent avec le
+    reste du module, qui exprime toujours les puissances négatives via
+    \\per côté dénominateur plutôt que via un \\tothe{} négatif côté
+    numérateur. Cette fonction rétablit cette convention unique avant le
+    rendu final.
+    """
+    num_clean, den_extra = [], []
+    for name, power in numerator:
+        (num_clean if power > 0 else den_extra).append([name, abs(power)])
+
+    den_clean, num_extra = [], []
+    for name, power in denominator:
+        (den_clean if power > 0 else num_extra).append([name, abs(power)])
+
+    return (
+        _merge_same_units(num_clean + num_extra),
+        _merge_same_units(den_clean + den_extra),
+    )
+
+
 def _render_unit_list(unit_list: list) -> str:
     parts = []
     for name, power in unit_list:
@@ -983,18 +1178,26 @@ def _divide_units(numerator_unit: str, denominator_unit: str) -> str:
 
     La concaténation textuelle échoue dès que numerator_unit contient déjà
     un \\per : diviser \\meter\\per\\second (une vitesse) par \\second (un
-    temps) donnait auparavant \\meter\\per\\second\\per\\second, qui compile
-    sans erreur mais s'affiche "m/(s s)" au lieu de "m/s²". Cette fonction
-    traite chaque unité comme une paire (numérateur, dénominateur), combine
-    les deux quotients, fusionne les puissances d'un même nom et simplifie
-    les unités communes, avant de reconstruire la chaîne siunitx finale
-    (ex: \\meter\\per\\square\\second).
+    temps) donnerait \\meter\\per\\second\\per\\second, qui compile sans
+    erreur mais s'affiche "m/(s s)" au lieu de "m/s²". Cette fonction
+    traite chaque unité comme une paire (numérateur, dénominateur),
+    combine les deux quotients, fusionne les puissances d'un même nom et
+    simplifie les unités communes, avant de reconstruire la chaîne
+    siunitx finale (ex: \\meter\\per\\square\\second).
+
+    Les unités composées à \\per multiples (ex:
+    \\kilo\\gram\\per\\meter\\per\\second) sont gérées correctement, la
+    réaffectation de `current` vers `denominator` étant idempotente au
+    second \\per. Les unités déjà porteuses d'une puissance \\tothe{n}
+    positive OU négative, issues d'un appel précédent (chaîne de
+    mesurandes), sont également réinjectées proprement.
     """
     num_y, den_y = _parse_unit(numerator_unit)
     num_x, den_x = _parse_unit(denominator_unit)
     combined_num = _merge_same_units(num_y + den_x)
     combined_den = _merge_same_units(den_y + num_x)
     combined_num, combined_den = _cancel_units(combined_num, combined_den)
+    combined_num, combined_den = _normalize_unit_signs(combined_num, combined_den)
     num_str = _render_unit_list(combined_num)
     den_str = _render_unit_list(combined_den)
     if den_str:
@@ -1064,16 +1267,27 @@ def generate_bilan_regression(
     lines.append("")
     lines.append(r"Le résultat de la régression s'écrit :")
 
-    intercept_term = (
-        rf"\left({_si(reg['theta0'], i_unit, sig=3)} \pm {_si(reg['u_theta0'], i_unit, sig=2)}\right)"
+    # On réutilise format_result (Partie 1) puis _format_result_uncertainty
+    # (Partie 2) pour appliquer la même règle métrologique (le nombre de
+    # décimales de la valeur est imposé par les 2 c.s. de son incertitude)
+    # et le même rendu siunitx autosuffisant (separate-uncertainty=true
+    # local) que pour le bilan GUM classique, plutôt que de reconstruire
+    # une mise en forme \pm indépendante non synchronisée.
+    fmt_intercept = format_result(reg['theta0'], reg['u_theta0'])
+    fmt_slope     = format_result(reg['theta1'], reg['u_theta1'])
+    intercept_expr = _format_result_uncertainty(
+        fmt_intercept['result'], fmt_intercept['U'], i_unit, sig_figs_exact=3
     )
-    slope_term = (
-        rf"\left({_si(reg['theta1'], s_unit, sig=3)} \pm {_si(reg['u_theta1'], s_unit, sig=2)}\right)"
+    slope_expr = _format_result_uncertainty(
+        fmt_slope['result'], fmt_slope['U'], s_unit, sig_figs_exact=3
     )
+
+    intercept_term = rf"\left({intercept_expr}\right)"
+    slope_term     = rf"\left({slope_expr}\right)"
     box_inline = rf"{y_symbol} = {intercept_term} + {slope_term} \cdot {x_symbol}"
 
     lines.append(r"\[")
-    if len(box_inline) > 70:
+    if len(box_inline) > _INLINE_MAX_CHARS:
         # Fallback multi-ligne : un \boxed{} ne peut contenir qu'une seule
         # ligne de display math nativement ; on imbrique un environnement
         # `array` pour conserver l'encadrement sur un résultat trop long
