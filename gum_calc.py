@@ -1,6 +1,22 @@
 """
 gum_calc.py — Moteur de calcul GUM + Export LaTeX
 
+LIMITATIONS CONNUES
+--------------------
+- Les grandeurs d'entrée d'une même formule sont supposées indépendantes :
+  aucune covariance n'est prise en compte dans `calculate_uncertainty`.
+  Cas le plus fréquent où cette hypothèse est mise en défaut : un
+  mesurande qui combine `theta0` et `theta1` issus de la même régression
+  linéaire (`full_pipeline_regression_to_measurand` émet alors un
+  `RuntimeWarning` explicite, voir cette fonction).
+- La propagation est strictement linéaire au premier ordre (dérivées
+  partielles à la valeur nominale) : pas d'alternative Monte-Carlo
+  (GUM Supplément 1) pour les modèles fortement non linéaires.
+- `linear_regression` n'implémente pas de régression pondérée : les
+  points de mesure sont supposés tous porter la même incertitude sur y.
+- L'algèbre d'unités siunitx (`_parse_unit`/`_divide_units`) est purement
+  symbolique sur le nom du token : aucune conversion numérique entre
+  préfixes SI d'une même unité de base (ex : \\kilo\\gram vs \\gram).
 """
 
 import math
@@ -57,6 +73,8 @@ def uncertainty_type_B_uniform(half_width: float) -> dict:
     ----------
     half_width : demi-largeur a de la distribution (même unité que la grandeur).
     """
+    if half_width < 0:
+        raise ValueError("half_width doit être positif ou nul.")
     u_B = half_width / math.sqrt(3)
     return {
         "u": u_B,
@@ -77,6 +95,8 @@ def uncertainty_type_B_from_resolution(resolution: float) -> dict:
     ----------
     resolution : résolution δ de l'instrument (graduation ou dernier digit).
     """
+    if resolution < 0:
+        raise ValueError("resolution doit être positive ou nulle.")
     return uncertainty_type_B_uniform(half_width=resolution / 2)
 
 
@@ -127,6 +147,49 @@ def uncertainty_type_B_relative(u_standard: float, relative_knowledge: float = N
     }
 
 
+_VALID_UNCERTAINTY_TYPES = {"A", "B", "exact"}
+
+
+def validate_uncertainty_inputs(
+    variable_names: list[str],
+    nominal_values: dict[str, float],
+    uncertainty_inputs: dict[str, dict],
+) -> None:
+    """
+    Vérifie la cohérence des entrées d'un mesurande avant tout calcul GUM.
+
+    Contrôle, pour chaque nom de `variable_names` : la présence d'une
+    valeur nominale et d'une entrée d'incertitude, la présence des clés
+    'u' et 'type' qu'attend `calculate_uncertainty`, la validité du type
+    ('A', 'B' ou 'exact'), et la positivité de l'incertitude-type 'u'.
+
+    Lève une ValueError nommant explicitement la variable et la cause,
+    plutôt que de laisser remonter un KeyError brut depuis le cœur du
+    calcul symbolique — à plusieurs appels de distance de l'erreur de
+    saisie qui l'a provoquée.
+    """
+    missing_nominal = [n for n in variable_names if n not in nominal_values]
+    if missing_nominal:
+        raise ValueError(f"Valeur nominale manquante pour : {missing_nominal}.")
+
+    missing_unc = [n for n in variable_names if n not in uncertainty_inputs]
+    if missing_unc:
+        raise ValueError(f"Incertitude manquante pour : {missing_unc}.")
+
+    for n in variable_names:
+        entry = uncertainty_inputs[n]
+        missing_keys = {"u", "type"} - entry.keys()
+        if missing_keys:
+            raise ValueError(f"'{n}' : clé(s) manquante(s) {sorted(missing_keys)}.")
+        if entry["type"] not in _VALID_UNCERTAINTY_TYPES:
+            raise ValueError(
+                f"'{n}' : type d'incertitude {entry['type']!r} invalide "
+                f"(attendu {sorted(_VALID_UNCERTAINTY_TYPES)})."
+            )
+        if entry["u"] < 0:
+            raise ValueError(f"'{n}' : incertitude-type négative ({entry['u']}).")
+
+
 def calculate_uncertainty(
     formula_str: str,
     variable_names: list[str],
@@ -157,6 +220,7 @@ def calculate_uncertainty(
     """
     if not variable_names:
         raise ValueError("variable_names ne peut pas être vide : un mesurande dépend d'au moins une grandeur.")
+    validate_uncertainty_inputs(variable_names, nominal_values, uncertainty_inputs)
     symbols = {name: sp.Symbol(name) for name in variable_names}
     formula = sp.sympify(formula_str, locals=symbols)
     subs = [(symbols[name], nominal_values[name]) for name in variable_names]
@@ -321,23 +385,37 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
     }
 
 
+def _round_half_up(value: float, step: float) -> float:
+    """
+    Arrondit value au multiple de step le plus proche, convention
+    "moitié vers le haut" symétrique en signe (et non le round-half-to-even
+    natif de Python, qui ferait diverger le dernier chiffre affiché selon
+    le chemin de code emprunté sur une coïncidence pile à la moitié).
+
+    Implémentation unique partagée par `round_to_sig_figs` (arrondi à N
+    chiffres significatifs, step exprimé en puissance de 10 négative) et
+    `format_result` (arrondi du résultat à l'échelle imposée par
+    l'incertitude élargie, step positif) : les deux opérations sont le
+    même arrondi "au multiple de step le plus proche", exprimées avec un
+    pas d'échelle différent. Centraliser cette opération évite qu'une
+    future évolution de la convention d'arrondi soit appliquée à l'une
+    des deux fonctions sans l'autre.
+    """
+    if value >= 0:
+        return math.floor(value / step + 0.5) * step
+    return -math.floor(-value / step + 0.5) * step
+
+
 def round_to_sig_figs(value: float, sig_figs: int) -> float:
     """
-    Arrondit value à sig_figs chiffres significatifs, selon la convention
-    "moitié vers le haut" (symétrique en signe) — la même que celle
-    implémentée à la main dans `format_result` pour le résultat encadré
-    final. Le `round()` natif de Python applique le round-half-to-even
-    ("banker's rounding") : sur une coïncidence pile à la moitié, les deux
-    fonctions divergeraient sur le dernier chiffre affiché d'une même
-    grandeur selon le chemin de code emprunté.
+    Arrondit value à sig_figs chiffres significatifs (voir _round_half_up
+    pour la convention d'arrondi retenue).
     """
     if value == 0:
         return 0.0
     magnitude = math.floor(math.log10(abs(value)))
-    factor    = 10 ** (sig_figs - 1 - magnitude)
-    if value >= 0:
-        return math.floor(value * factor + 0.5) / factor
-    return -math.floor(-value * factor + 0.5) / factor
+    step      = 10 ** (magnitude - sig_figs + 1)
+    return _round_half_up(value, step)
 
 
 def format_result(result: float, U: float, sig_figs_exact: int = 4) -> dict:
@@ -357,12 +435,8 @@ def format_result(result: float, U: float, sig_figs_exact: int = 4) -> dict:
 
     mag_U    = math.floor(math.log10(abs(U_rounded)))
     decimals = -mag_U + 1
-    factor   = 10 ** (mag_U - 1)
-
-    if result >= 0:
-        result_rounded = math.floor(result / factor + 0.5) * factor
-    else:
-        result_rounded = -math.floor(-result / factor + 0.5) * factor
+    step     = 10 ** (mag_U - 1)
+    result_rounded = _round_half_up(result, step)
 
     return {
         "result": result_rounded,
@@ -427,6 +501,38 @@ _SCI_NOTATION_MAG_MAX = 3    # au-dessus  : notation scientifique
 _INLINE_MAX_CHARS     = 70   # au-delà : \boxed{...} bascule en \begin{array}
 _ALIGN_MAX_CHARS      = 90   # au-delà : ligne unique \[ \] bascule en align*
 _ALIGN_MAX_TERMS      = 3    # à partir de : bascule en align* (même sans dépasser la longueur)
+
+_LATEX_SPECIAL_CHARS = {
+    "\\": r"\textbackslash{}",
+    "&":  r"\&",
+    "%":  r"\%",
+    "$":  r"\$",
+    "#":  r"\#",
+    "_":  r"\_",
+    "{":  r"\{",
+    "}":  r"\}",
+    "~":  r"\textasciitilde{}",
+    "^":  r"\textasciicircum{}",
+}
+
+
+def _escape_latex(s: str) -> str:
+    """
+    Échappe les caractères spéciaux LaTeX d'une chaîne de prose libre.
+
+    Réservé aux champs insérés tels quels en dehors de tout mode
+    mathématique (measurand_name, titres de sous-section) : measurand_symbol
+    et variable_symbols, eux, sont du LaTeX volontairement saisi par
+    l'utilisateur ($\\theta_1$, \\alpha...) et ne doivent surtout pas être
+    échappés, sous peine de casser l'affichage mathématique recherché.
+
+    La substitution caractère par caractère (et non une succession de
+    `str.replace`) évite le double échappement d'un caractère déjà
+    introduit par le remplacement d'un caractère précédent.
+    """
+    if not s:
+        return s
+    return "".join(_LATEX_SPECIAL_CHARS.get(c, c) for c in s)
 
 def _mantissa_exp(value: float, sig: int):
     """
@@ -643,19 +749,20 @@ def generate_bilan(
     k_override: float = None,
     subsection: bool = True,
     global_sig_figs: int = 3,
+    _res_precomputed: dict = None,
 ) -> str:
     """
     Génère le bloc LaTeX complet du bilan d'incertitudes pour un mesurande.
-    """
-    for n in variable_names:
-        t = uncertainty_inputs[n]["type"]
-        if t not in ("exact", "A", "B"):
-            raise ValueError(
-                f"Type d'incertitude inconnu pour la variable '{n}' : {t!r}. "
-                "Attendu 'exact', 'A' ou 'B' (voir uncertainty_type_* dans la Partie 1 du README)."
-            )
 
-    res      = full_gum_analysis(
+    `_res_precomputed` accepte le dict déjà renvoyé par un appel antérieur
+    à `full_gum_analysis` sur les mêmes arguments (même pattern que
+    `_reg_precomputed` dans `generate_bilan_regression`) : évite de relancer
+    tout le calcul symbolique quand le notebook appelant a déjà besoin du
+    résultat numérique en amont (affichage console, chaînage vers un autre
+    mesurande). La validation des entrées a alors déjà eu lieu lors de ce
+    premier appel ; elle n'est pas refaite ici.
+    """
+    res      = _res_precomputed if _res_precomputed is not None else full_gum_analysis(
         formula_str, variable_names, nominal_values, uncertainty_inputs, k_override,
         global_sig_figs=global_sig_figs,
     )
@@ -680,7 +787,7 @@ def generate_bilan(
     # une redondance du type "$R$ ($R$)".
     name_clause = ""
     if measurand_name and measurand_name.strip().lower() != measurand_symbol.strip().lower():
-        name_clause = f" ({measurand_name})"
+        name_clause = f" ({_escape_latex(measurand_name)})"
 
     lines.append(rf"\noindent Le mesurande ${measurand_symbol}${name_clause} est lié aux grandeurs d'entrée par le modèle :")
     lines.append(r"\[")
@@ -997,6 +1104,23 @@ def full_pipeline_regression_to_measurand(
     """
     Génère d'un seul appel le LaTeX complet : régression + propagation GUM.
     """
+    if "theta0" in variable_names and "theta1" in variable_names:
+        # theta0 et theta1 sont deux estimateurs des moindres carrés issus
+        # de la même régression : ils sont corrélés par construction
+        # (covariance non nulle dès que x̄ != 0), mais sont injectés
+        # ci-dessous comme deux composantes indépendantes dans
+        # calculate_uncertainty (limite documentée en tête de module).
+        # L'incertitude composée du mesurande final peut donc être
+        # sous-estimée tant que cette covariance n'est pas prise en compte.
+        warnings.warn(
+            "full_pipeline_regression_to_measurand : theta0 et theta1 sont "
+            "tous deux utilisés dans le mesurande final mais traités comme "
+            "indépendants — la covariance entre les deux estimateurs de la "
+            "régression n'est pas modélisée. L'incertitude composée "
+            "obtenue peut être sous-estimée.",
+            RuntimeWarning,
+        )
+
     reg      = linear_regression(x_data, y_data)
     nominals = {**nominal_values_helpers}
     inputs   = {**uncertainty_inputs_helpers}
@@ -1225,7 +1349,7 @@ def generate_bilan_regression(
     s_unit = slope_unit if slope_unit else _divide_units(y_unit, x_unit)
     i_unit = intercept_unit if intercept_unit else y_unit
 
-    lines.append(rf"\subsection{{Bilan --- {subsection_title}}}")
+    lines.append(rf"\subsection{{Bilan --- {_escape_latex(subsection_title)}}}")
     lines.append("")
     lines.append(
         rf"On cherche les paramètres de la droite "
