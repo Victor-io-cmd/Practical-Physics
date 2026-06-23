@@ -22,6 +22,7 @@ LIMITATIONS CONNUES
 import math
 import re
 import warnings
+from decimal import Decimal, ROUND_HALF_UP
 import sympy as sp
 from scipy import stats as scipy_stats
 
@@ -219,20 +220,57 @@ def calculate_uncertainty(
       partial_derivs  — dict {nom: expression SymPy de ∂f/∂x_i}
     """
     if not variable_names:
-        raise ValueError("variable_names ne peut pas être vide : un mesurande dépend d'au moins une grandeur.")
+        raise ValueError(
+            "variable_names ne peut pas être vide : un mesurande "
+            "dépend d'au moins une grandeur."
+        )
     validate_uncertainty_inputs(variable_names, nominal_values, uncertainty_inputs)
+
     symbols = {name: sp.Symbol(name) for name in variable_names}
     formula = sp.sympify(formula_str, locals=symbols)
+
+    # Détection des symboles non déclarés dans formula_str : un identifiant
+    # absent de variable_names crée un symbole libre non substitué, ce qui
+    # fait lever un TypeError cryptique plusieurs appels plus loin.
+    undeclared = formula.free_symbols - set(symbols.values())
+    if undeclared:
+        names_str = ", ".join(sorted(str(s) for s in undeclared))
+        raise ValueError(
+            f"formula_str contient des symboles non déclarés dans "
+            f"variable_names : {{{names_str}}}. "
+            f"Ajoutez-les à variable_names ou corrigez formula_str."
+        )
+
     subs = [(symbols[name], nominal_values[name]) for name in variable_names]
 
-    result = float(formula.subs(subs))
+    def _safe_float(expr, context: str) -> float:
+        """Convertit une expression SymPy en float avec un message d'erreur explicite."""
+        try:
+            return float(expr.subs(subs))
+        except (TypeError, ValueError) as exc:
+            evaluated = expr.subs(subs)
+            if evaluated.is_infinite:
+                detail = "singularité (division par zéro ou pôle)"
+            elif getattr(evaluated, "is_nan", False):
+                detail = "valeur indéfinie (NaN SymPy)"
+            elif evaluated.free_symbols:
+                detail = f"symbole(s) résiduel(s) : {evaluated.free_symbols}"
+            else:
+                detail = str(exc)
+            nom_str = ", ".join(f"{n}={nominal_values[n]}" for n in variable_names)
+            raise ValueError(
+                f"Impossible d'évaluer {context} au point nominal "
+                f"({{{nom_str}}}). Cause : {detail}."
+            ) from exc
+
+    result = _safe_float(formula, "la formule")
 
     partial_derivs = {}
     sensitivities = {}
     for name in variable_names:
         dp = sp.diff(formula, symbols[name])
         partial_derivs[name] = dp
-        sensitivities[name] = float(dp.subs(subs))
+        sensitivities[name] = _safe_float(dp, f"∂f/∂{name}")
 
     contributions = {}
     uc_squared = 0.0
@@ -245,9 +283,10 @@ def calculate_uncertainty(
 
     uc = math.sqrt(uc_squared)
 
-    budget = {}
-    for name in variable_names:
-        budget[name] = 100.0 * contributions[name] / uc_squared if uc_squared > 0 else 0.0
+    budget = {
+        name: 100.0 * contributions[name] / uc_squared if uc_squared > 0 else 0.0
+        for name in variable_names
+    }
 
     return {
         "result": result,
@@ -282,7 +321,9 @@ def welch_satterthwaite(
         ui   = uncertainty_inputs[name]["u"]
         nu_i = uncertainty_inputs[name].get("nu", float("inf"))
         ui_y = ci * ui
-        if nu_i != float("inf") and abs(ui_y) > 0:
+        # math.isfinite() rejette correctement inf ET nan,
+        # contrairement à != float("inf") qui laisse passer nan.
+        if math.isfinite(nu_i) and nu_i > 0 and abs(ui_y) > 0:
             denominator  += (ui_y ** 4) / nu_i
             has_finite_nu = True
 
@@ -329,47 +370,55 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
     if N < 3:
         raise ValueError("La régression linéaire requiert au moins 3 points.")
 
-    sum_x  = sum(x_data)
-    sum_y  = sum(y_data)
-    sum_x2 = sum(x ** 2 for x in x_data)
-    sum_xy = sum(x * y for x, y in zip(x_data, y_data))
+    for label, data in (("x_data", x_data), ("y_data", y_data)):
+        bad = [v for v in data if not math.isfinite(v)]
+        if bad:
+            raise ValueError(
+                f"{label} contient des valeurs non finies ({bad[:3]}). "
+                "Nettoyez les données avant la régression."
+            )
 
-    det = N * sum_x2 - sum_x ** 2
-    if det == 0:
+    # Centrage préalable : élimine la cancellation catastrophique sur les
+    # données à grand offset (différence de grands nombres proches dans les
+    # sommes Σx², Σxy). Les estimateurs OLS sont identiques à la formule
+    # classique — seule la stabilité numérique change.
+    x_mean = sum(x_data) / N
+    y_mean = sum(y_data) / N
+    xc = [x - x_mean for x in x_data]
+    yc = [y - y_mean for y in y_data]
+
+    sxx = sum(xi ** 2 for xi in xc)
+    sxy = sum(xi * yi for xi, yi in zip(xc, yc))
+
+    if sxx == 0:
         raise ValueError("Déterminant nul : toutes les valeurs xi sont identiques.")
 
-    theta1 = (N * sum_xy - sum_x * sum_y) / det
-    theta0 = (sum_x2 * sum_y - sum_x * sum_xy) / det
+    theta1 = sxy / sxx
+    theta0 = y_mean - theta1 * x_mean
 
     y_pred    = [theta0 + theta1 * x for x in x_data]
     residuals = [y - yp for y, yp in zip(y_data, y_pred)]
     s2_res    = sum(r ** 2 for r in residuals) / (N - 2)
 
-    # Garde-fou GUM : en grande dynamique (x ou y de plusieurs ordres de
-    # grandeur), le calcul de `det` et des résidus peut souffrir d'une
-    # cancellation catastrophique (différence de grands nombres proches),
-    # produisant un résidu purement numérique sans qu'aucune exception ne
-    # soit levée. Une telle valeur n'a aucune signification physique et
-    # conduirait à une incertitude u(θ₁)/u(θ₀) artificiellement quasi nulle.
-    scale_y = max((y ** 2 for y in y_data), default=0.0)
-    if scale_y > 0 and s2_res < 1e-12 * scale_y:
+    # Le garde-fou compare désormais s2_res à Var(y) centrée, qui est
+    # l'échelle pertinente pour les résidus — contrairement à max(y²) qui
+    # peut masquer une cancellation si les données ont un grand offset.
+    syy = sum(yi ** 2 for yi in yc)
+    if syy > 0 and s2_res < 1e-12 * syy / (N - 1):
         warnings.warn(
-            "linear_regression : la variance résiduelle s2_res est du même "
-            "ordre que le bruit de troncature flottante (cancellation "
-            "catastrophique probable sur des données de grande dynamique). "
-            "L'incertitude sur theta0/theta1 qui en découle n'a "
-            "probablement aucune signification physique — vérifier "
-            "l'échelle des données en entrée.",
+            "linear_regression : variance résiduelle quasi nulle — "
+            "données quasi-colinéaires ou cancellation résiduelle. "
+            "Vérifier la signification physique de u(theta0)/u(theta1).",
             RuntimeWarning,
         )
 
-    u_theta1 = math.sqrt(s2_res * N / det)
-    u_theta0 = math.sqrt(s2_res * sum_x2 / det)
+    # Var(θ₁) = s²/Sxx, Var(θ₀) = s²·(1/N + x̄²/Sxx) — formes centrées,
+    # numériquement équivalentes aux formes classiques mais plus stables.
+    u_theta1 = math.sqrt(s2_res / sxx)
+    u_theta0 = math.sqrt(s2_res * (1.0 / N + x_mean ** 2 / sxx))
 
-    mean_y = sum_y / N
-    ss_tot = sum((y - mean_y) ** 2 for y in y_data)
     ss_res = sum(r ** 2 for r in residuals)
-    r2     = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    r2     = 1.0 - ss_res / syy if syy > 0 else 1.0
 
     return {
         "theta0": theta0,
@@ -388,22 +437,25 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
 def _round_half_up(value: float, step: float) -> float:
     """
     Arrondit value au multiple de step le plus proche, convention
-    "moitié vers le haut" symétrique en signe (et non le round-half-to-even
-    natif de Python, qui ferait diverger le dernier chiffre affiché selon
-    le chemin de code emprunté sur une coïncidence pile à la moitié).
+    "moitié vers le haut" symétrique en signe.
 
-    Implémentation unique partagée par `round_to_sig_figs` (arrondi à N
-    chiffres significatifs, step exprimé en puissance de 10 négative) et
-    `format_result` (arrondi du résultat à l'échelle imposée par
-    l'incertitude élargie, step positif) : les deux opérations sont le
-    même arrondi "au multiple de step le plus proche", exprimées avec un
-    pas d'échelle différent. Centraliser cette opération évite qu'une
-    future évolution de la convention d'arrondi soit appliquée à l'une
-    des deux fonctions sans l'autre.
+    Implémentation via decimal.Decimal (str → Decimal) pour éviter
+    l'instabilité IEEE 754 : `0.15 / 0.1 = 1.4999999999999998` en float,
+    ce qui fait basculer math.floor du mauvais côté pour les valeurs
+    décimales exactement à mi-chemin (0.15, 0.35, 0.45...). La conversion
+    str → Decimal reproduit fidèlement la valeur décimale attendue.
+
+    Implémentation unique partagée par `round_to_sig_figs` et
+    `format_result` — centraliser l'arrondi évite toute divergence future
+    entre les deux fonctions.
     """
-    if value >= 0:
-        return math.floor(value / step + 0.5) * step
-    return -math.floor(-value / step + 0.5) * step
+    if value == 0:
+        return 0.0
+    sign = 1 if value >= 0 else -1
+    d_abs  = Decimal(str(abs(value)))
+    d_step = Decimal(str(step))
+    rounded = (d_abs / d_step).to_integral_value(rounding=ROUND_HALF_UP)
+    return sign * float(rounded * d_step)
 
 
 def round_to_sig_figs(value: float, sig_figs: int) -> float:
@@ -613,8 +665,10 @@ def _format_magnitude(value: float, sig: int) -> str:
     final (\\num{} ou \\SI{}{unité}).
     """
     value = round_to_sig_figs(value, sig)
-    sign  = "-" if value < 0 else ""
-    mag   = math.floor(math.log10(abs(value)))
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    mag  = math.floor(math.log10(abs(value)))
     if _SCI_NOTATION_MAG_MIN <= mag <= _SCI_NOTATION_MAG_MAX:
         decimals = max(0, sig - 1 - mag)
         return f"{value:.{decimals}f}"
@@ -1208,6 +1262,10 @@ def _parse_unit(unit_str: str) -> tuple[list, list]:
     for t in tokens:
         if t == _SI_PER:
             current = denominator
+            # Un modificateur (préfixe ou puissance) non consommé avant \per
+            # est orphelin : le laisser en l'état le ferait se coller
+            # silencieusement au premier token du dénominateur.
+            pending_prefix, pending_power = "", 1
             continue
         if t in _SI_PREFIX_TOKENS:
             pending_prefix += t
@@ -1397,8 +1455,8 @@ def generate_bilan_regression(
     # et le même rendu siunitx autosuffisant (separate-uncertainty=true
     # local) que pour le bilan GUM classique, plutôt que de reconstruire
     # une mise en forme \pm indépendante non synchronisée.
-    fmt_intercept = format_result(reg['theta0'], reg['u_theta0'])
-    fmt_slope     = format_result(reg['theta1'], reg['u_theta1'])
+    fmt_intercept = format_result(reg['theta0'], reg['u_theta0'], sig_figs_exact=3)
+    fmt_slope     = format_result(reg['theta1'], reg['u_theta1'], sig_figs_exact=3)
     intercept_expr = _format_result_uncertainty(
         fmt_intercept['result'], fmt_intercept['U'], i_unit, sig_figs_exact=3
     )
@@ -1430,8 +1488,5 @@ def generate_bilan_regression(
 
 
 def generate_annexe(bilans: list[str]) -> str:
-    """
-    Assemble la section LaTeX d'annexe à partir d'une liste de bilans.
-    """
     body = "\n\n".join(bilans)
     return r"\section{Annexe : Bilans d'incertitudes}" + "\n\n" + body
