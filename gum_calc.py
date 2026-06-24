@@ -22,7 +22,9 @@ LIMITATIONS CONNUES
 import math
 import re
 import warnings
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+from types import MappingProxyType
 import sympy as sp
 from scipy import stats as scipy_stats
 
@@ -31,7 +33,50 @@ from scipy import stats as scipy_stats
 # PARTIE 1 — MOTEUR DE CALCUL GUM
 # ============================================================
 
-def uncertainty_type_A(values: list[float]) -> dict:
+# Ensemble des tokens siunitx reconnus comme unités de base ou dérivées.
+# Utilisé par `_parse_unit` pour détecter les fautes d'orthographe au
+# moment de la construction de l'expression d'unité.
+_KNOWN_SIUNITX_UNITS = {
+    r"\meter", r"\gram", r"\second", r"\ampere", r"\kelvin",
+    r"\mole", r"\candela", r"\ohm", r"\volt", r"\watt",
+    r"\hertz", r"\newton", r"\pascal", r"\joule", r"\coulomb",
+    r"\farad", r"\henry", r"\tesla", r"\becquerel", r"\gray",
+    r"\lumen", r"\lux", r"\radian", r"\steradian",
+}
+
+
+@dataclass
+class UncertaintyInput:
+    """
+    Conteneur typé pour une source d'incertitude GUM.
+
+    Remplace l'ancien dict brut retourné par les fonctions
+    `uncertainty_type_*`. La validation des champs `u` et `type` est
+    effectuée dans `__post_init__`, ce qui rend les erreurs de saisie
+    détectables dès la construction plutôt qu'au cœur du calcul.
+    """
+    u: float
+    type: str           # "A" | "B" | "exact"
+    nu: float = float("inf")
+    distribution: str = ""   # "uniform" | "general" | "constant" | ""
+    N: int = 0           # Type A : nombre de mesures
+    s: float = 0.0       # Type A : écart-type empirique
+    a: float = 0.0       # Type B uniform : demi-largeur
+
+    def __post_init__(self):
+        if self.type not in ("A", "B", "exact"):
+            raise ValueError(f"type invalide : {self.type!r}")
+        if self.u < 0:
+            raise ValueError(f"u doit être positif ou nul : {self.u}")
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "UncertaintyInput":
+        """Compatibilité arrière : accepte l'ancien format dict."""
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+def uncertainty_type_A(values: list[float]) -> UncertaintyInput:
     """
     Incertitude de type A par répétition sur N mesures indépendantes.
 
@@ -39,13 +84,7 @@ def uncertainty_type_A(values: list[float]) -> dict:
     ----------
     values : liste des valeurs mesurées (au moins 2).
 
-    Retourne un dict avec :
-      mean  — moyenne empirique
-      s     — écart-type empirique (estimateur de σ)
-      u     — incertitude-type u_A = s / sqrt(N)
-      N     — nombre de mesures
-      nu    — degrés de liberté (N - 1)
-      type  — "A"
+    Retourne un UncertaintyInput avec u = s/sqrt(N), nu = N-1.
     """
     N = len(values)
     if N < 2:
@@ -54,17 +93,10 @@ def uncertainty_type_A(values: list[float]) -> dict:
     variance = sum((x - mean) ** 2 for x in values) / (N - 1)
     s = math.sqrt(variance)
     u_A = s / math.sqrt(N)
-    return {
-        "mean": mean,
-        "s": s,
-        "u": u_A,
-        "N": N,
-        "nu": N - 1,
-        "type": "A",
-    }
+    return UncertaintyInput(u=u_A, type="A", nu=N - 1, N=N, s=s)
 
 
-def uncertainty_type_B_uniform(half_width: float) -> dict:
+def uncertainty_type_B_uniform(half_width: float) -> UncertaintyInput:
     """
     Incertitude de type B — distribution uniforme de demi-largeur a.
 
@@ -77,16 +109,11 @@ def uncertainty_type_B_uniform(half_width: float) -> dict:
     if half_width < 0:
         raise ValueError("half_width doit être positif ou nul.")
     u_B = half_width / math.sqrt(3)
-    return {
-        "u": u_B,
-        "a": half_width,
-        "type": "B",
-        "distribution": "uniform",
-        "nu": float("inf"),
-    }
+    return UncertaintyInput(u=u_B, type="B", distribution="uniform",
+                            nu=float("inf"), a=half_width)
 
 
-def uncertainty_type_B_from_resolution(resolution: float) -> dict:
+def uncertainty_type_B_from_resolution(resolution: float) -> UncertaintyInput:
     """
     Incertitude de type B à partir de la résolution δ d'un instrument numérique.
 
@@ -101,25 +128,20 @@ def uncertainty_type_B_from_resolution(resolution: float) -> dict:
     return uncertainty_type_B_uniform(half_width=resolution / 2)
 
 
-def uncertainty_type_exact() -> dict:
+def uncertainty_type_exact() -> UncertaintyInput:
     """
     Constante exacte — incertitude-type nulle par définition.
 
     À utiliser pour les constantes physiques fondamentales (c, e, h...),
     les masses étalons certifiées, ou toute grandeur dont l'incertitude
     est négligeable devant les autres sources.
-
-    Retourne un dict avec u = 0.0 et nu = inf.
     """
-    return {
-        "u": 0.0,
-        "type": "exact",
-        "distribution": "constant",
-        "nu": float("inf"),
-    }
+    return UncertaintyInput(u=0.0, type="exact", distribution="constant",
+                            nu=float("inf"))
 
 
-def uncertainty_type_B_relative(u_standard: float, relative_knowledge: float = None) -> dict:
+def uncertainty_type_B_relative(u_standard: float,
+                                 relative_knowledge: float = None) -> UncertaintyInput:
     """
     Incertitude de type B — valeur de l'incertitude-type fournie directement.
 
@@ -140,12 +162,7 @@ def uncertainty_type_B_relative(u_standard: float, relative_knowledge: float = N
     nu = float("inf")
     if relative_knowledge is not None and relative_knowledge > 0:
         nu = 1.0 / (2.0 * relative_knowledge ** 2)
-    return {
-        "u": u_standard,
-        "type": "B",
-        "distribution": "general",
-        "nu": nu,
-    }
+    return UncertaintyInput(u=u_standard, type="B", distribution="general", nu=nu)
 
 
 _VALID_UNCERTAINTY_TYPES = {"A", "B", "exact"}
@@ -154,20 +171,15 @@ _VALID_UNCERTAINTY_TYPES = {"A", "B", "exact"}
 def validate_uncertainty_inputs(
     variable_names: list[str],
     nominal_values: dict[str, float],
-    uncertainty_inputs: dict[str, dict],
+    uncertainty_inputs: dict[str, UncertaintyInput],
 ) -> None:
     """
-    Vérifie la cohérence des entrées d'un mesurande avant tout calcul GUM.
+    Vérifie la présence de toutes les clés nécessaires avant tout calcul GUM.
 
-    Contrôle, pour chaque nom de `variable_names` : la présence d'une
-    valeur nominale et d'une entrée d'incertitude, la présence des clés
-    'u' et 'type' qu'attend `calculate_uncertainty`, la validité du type
-    ('A', 'B' ou 'exact'), et la positivité de l'incertitude-type 'u'.
-
-    Lève une ValueError nommant explicitement la variable et la cause,
-    plutôt que de laisser remonter un KeyError brut depuis le cœur du
-    calcul symbolique — à plusieurs appels de distance de l'erreur de
-    saisie qui l'a provoquée.
+    La validation du contenu de chaque UncertaintyInput (u ≥ 0, type valide)
+    est déléguée à UncertaintyInput.__post_init__, qui s'exécute à la
+    construction. Cette fonction se limite donc à vérifier la présence
+    d'une valeur nominale et d'une entrée d'incertitude pour chaque variable.
     """
     missing_nominal = [n for n in variable_names if n not in nominal_values]
     if missing_nominal:
@@ -177,25 +189,12 @@ def validate_uncertainty_inputs(
     if missing_unc:
         raise ValueError(f"Incertitude manquante pour : {missing_unc}.")
 
-    for n in variable_names:
-        entry = uncertainty_inputs[n]
-        missing_keys = {"u", "type"} - entry.keys()
-        if missing_keys:
-            raise ValueError(f"'{n}' : clé(s) manquante(s) {sorted(missing_keys)}.")
-        if entry["type"] not in _VALID_UNCERTAINTY_TYPES:
-            raise ValueError(
-                f"'{n}' : type d'incertitude {entry['type']!r} invalide "
-                f"(attendu {sorted(_VALID_UNCERTAINTY_TYPES)})."
-            )
-        if entry["u"] < 0:
-            raise ValueError(f"'{n}' : incertitude-type négative ({entry['u']}).")
-
 
 def calculate_uncertainty(
     formula_str: str,
     variable_names: list[str],
     nominal_values: dict[str, float],
-    uncertainty_inputs: dict[str, dict],
+    uncertainty_inputs: dict[str, UncertaintyInput],
 ) -> dict:
     """
     Propagation GUM par dérivation symbolique (SymPy).
@@ -208,7 +207,7 @@ def calculate_uncertainty(
     formula_str       : expression SymPy du mesurande (ex: "U / I").
     variable_names    : liste ordonnée des noms de variables.
     nominal_values    : dict {nom: valeur nominale}.
-    uncertainty_inputs: dict {nom: dict renvoyé par uncertainty_type_*}.
+    uncertainty_inputs: dict {nom: UncertaintyInput}.
 
     Retourne un dict avec :
       result          — valeur nominale du mesurande
@@ -276,7 +275,7 @@ def calculate_uncertainty(
     uc_squared = 0.0
     for name in variable_names:
         ci = sensitivities[name]
-        ui = uncertainty_inputs[name]["u"]
+        ui = uncertainty_inputs[name].u
         contrib = ci ** 2 * ui ** 2
         contributions[name] = contrib
         uc_squared += contrib
@@ -302,7 +301,7 @@ def calculate_uncertainty(
 def welch_satterthwaite(
     variable_names: list[str],
     sensitivities: dict[str, float],
-    uncertainty_inputs: dict[str, dict],
+    uncertainty_inputs: dict[str, UncertaintyInput],
     uc_squared: float,
 ) -> dict:
     """
@@ -318,8 +317,8 @@ def welch_satterthwaite(
     has_finite_nu = False
     for name in variable_names:
         ci   = sensitivities[name]
-        ui   = uncertainty_inputs[name]["u"]
-        nu_i = uncertainty_inputs[name].get("nu", float("inf"))
+        ui   = uncertainty_inputs[name].u
+        nu_i = uncertainty_inputs[name].nu
         ui_y = ci * ui
         # math.isfinite() rejette correctement inf ET nan,
         # contrairement à != float("inf") qui laisse passer nan.
@@ -501,12 +500,15 @@ def full_gum_analysis(
     formula_str: str,
     variable_names: list[str],
     nominal_values: dict[str, float],
-    uncertainty_inputs: dict[str, dict],
+    uncertainty_inputs: dict[str, UncertaintyInput],
     k_override: float = None,
     global_sig_figs: int = 4,
-) -> dict:
+) -> MappingProxyType:
     """
     Pipeline GUM complet : propagation + Welch-Satterthwaite + formatage.
+
+    Retourne un MappingProxyType (lecture seule) pour prévenir toute
+    mutation accidentelle du résultat après coup.
 
     `global_sig_figs` ne pilote que le cas particulier où toutes les
     grandeurs d'entrée sont exactes (U = 0, voir `format_result`) : c'est
@@ -529,7 +531,7 @@ def full_gum_analysis(
     U         = expanded_uncertainty(calc["uc"], k)
     formatted = format_result(calc["result"], U, sig_figs_exact=global_sig_figs)
 
-    return {
+    return MappingProxyType({
         **calc,
         "nu_eff": ws["nu_eff"],
         "k": k,
@@ -537,7 +539,7 @@ def full_gum_analysis(
         "result_rounded": formatted["result"],
         "U_rounded": formatted["U"],
         "decimals": formatted["decimals"],
-    }
+    })
 
 
 # ============================================================
@@ -585,6 +587,7 @@ def _escape_latex(s: str) -> str:
     if not s:
         return s
     return "".join(_LATEX_SPECIAL_CHARS.get(c, c) for c in s)
+
 
 def _mantissa_exp(value: float, sig: int):
     """
@@ -798,23 +801,22 @@ def generate_bilan(
     variable_symbols: dict[str, str],
     variable_units: dict[str, str],
     nominal_values: dict[str, float],
-    uncertainty_inputs: dict[str, dict],
+    uncertainty_inputs: dict[str, UncertaintyInput],
     measurand_unit: str = "",
     k_override: float = None,
     subsection: bool = True,
     global_sig_figs: int = 3,
-    _res_precomputed: dict = None,
+    _res_precomputed=None,
 ) -> str:
     """
     Génère le bloc LaTeX complet du bilan d'incertitudes pour un mesurande.
 
-    `_res_precomputed` accepte le dict déjà renvoyé par un appel antérieur
-    à `full_gum_analysis` sur les mêmes arguments (même pattern que
-    `_reg_precomputed` dans `generate_bilan_regression`) : évite de relancer
-    tout le calcul symbolique quand le notebook appelant a déjà besoin du
-    résultat numérique en amont (affichage console, chaînage vers un autre
-    mesurande). La validation des entrées a alors déjà eu lieu lors de ce
-    premier appel ; elle n'est pas refaite ici.
+    `_res_precomputed` accepte le MappingProxyType déjà renvoyé par un
+    appel antérieur à `full_gum_analysis` sur les mêmes arguments : évite
+    de relancer tout le calcul symbolique quand le notebook appelant a déjà
+    besoin du résultat numérique en amont (affichage console, chaînage vers
+    un autre mesurande). La validation des entrées a alors déjà eu lieu lors
+    de ce premier appel ; elle n'est pas refaite ici.
     """
     res      = _res_precomputed if _res_precomputed is not None else full_gum_analysis(
         formula_str, variable_names, nominal_values, uncertainty_inputs, k_override,
@@ -858,7 +860,7 @@ def generate_bilan(
         defs_str = ", ".join(defs[:-1]) + " et " + defs[-1]
     else:
         defs_str = defs[0]
-    
+
     lines.append(
         r"\noindent avec " + defs_str
         + rf", ce qui donne la valeur nominale "
@@ -871,16 +873,16 @@ def generate_bilan(
         inp   = uncertainty_inputs[n]
         sym   = sym_map[n]
         unit  = unit_map[n]
-        u_val = inp["u"]
+        u_val = inp.u
 
-        if inp["type"] == "exact":
+        if inp.type == "exact":
             lines.append(
                 rf"\noindent La grandeur ${sym}$ est une constante exacte déterminée par définition. "
                 rf"Son incertitude-type est nulle : $u({sym}) = 0$."
             )
-        elif inp["type"] == "A":
-            N_mes     = inp["N"]
-            s         = inp["s"]
+        elif inp.type == "A":
+            N_mes     = inp.N
+            s         = inp.s
             sym_mean  = sym if sym.strip().startswith(r"\bar{") else rf"\bar{{{sym}}}"
             lines.append(
                 rf"\noindent La répétition de $N = {N_mes}$ mesures sur ${sym}$ fournit "
@@ -893,10 +895,10 @@ def generate_bilan(
                 rf" = {_si(u_val, unit, sig=global_sig_figs)}"
             )
             lines.append(r"\]")
-        elif inp["type"] == "B":
-            dist = inp.get("distribution", "uniform")
+        elif inp.type == "B":
+            dist = inp.distribution
             if dist == "uniform":
-                a     = inp.get("a", u_val * math.sqrt(3))
+                a     = inp.a
                 delta = a * 2
                 lines.append(
                     rf"\noindent La grandeur ${sym}$ est issue d'une lecture unique sur un instrument "
@@ -949,10 +951,10 @@ def generate_bilan(
     uc = res["uc"]
     inner_terms = []
     for n in variable_names:
-        if uncertainty_inputs[n]["type"] == "exact":
+        if uncertainty_inputs[n].type == "exact":
             continue
         ci = res["sensitivities"][n]
-        ui = uncertainty_inputs[n]["u"]
+        ui = uncertainty_inputs[n].u
         inner_terms.append(
             rf"({_sci(ci, sig=global_sig_figs)})^2 \, ({_num(ui, sig=global_sig_figs)})^2"
         )
@@ -1003,11 +1005,11 @@ def generate_bilan(
         nu_lines = []
         descriptions = []
         for n in variable_names:
-            if uncertainty_inputs[n]["type"] == "exact":
+            if uncertainty_inputs[n].type == "exact":
                 continue
             ci   = res["sensitivities"][n]
-            ui   = uncertainty_inputs[n]["u"]
-            nu_i = uncertainty_inputs[n].get("nu", float("inf"))
+            ui   = uncertainty_inputs[n].u
+            nu_i = uncertainty_inputs[n].nu
             # nu_i (typiquement 1/(2r²) pour une connaissance relative)
             # n'est généralement pas entier. On tronque par int() plutôt
             # que d'arrondir au plus proche, par choix délibéré et
@@ -1031,7 +1033,7 @@ def generate_bilan(
             if nu_i == float("inf") or abs(ci * ui) == 0:
                 continue
             nu_lines.append(rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{{int(nu_i)}}}")
-            type_str = "type~A" if uncertainty_inputs[n]["type"] == "A" else "type~B"
+            type_str = "type~A" if uncertainty_inputs[n].type == "A" else "type~B"
             descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {int(nu_i)}$)")
 
         desc_str = ", ".join(descriptions[:-1]) + " et " + descriptions[-1] if len(descriptions) > 1 else descriptions[0]
@@ -1068,14 +1070,14 @@ def generate_bilan(
 
     non_exact_budget = {
         kk: vv for kk, vv in res["budget"].items()
-        if uncertainty_inputs[kk]["type"] != "exact"
+        if uncertainty_inputs[kk].type != "exact"
     }
-    
+
     if non_exact_budget:
         lines.append(r"\noindent Le budget d'incertitudes :")
         budget_terms = []
         for n in variable_names:
-            if uncertainty_inputs[n]["type"] == "exact":
+            if uncertainty_inputs[n].type == "exact":
                 continue
             pct = res["budget"][n]
             budget_terms.append(
@@ -1146,7 +1148,7 @@ def full_pipeline_regression_to_measurand(
     variable_symbols: dict[str, str],
     variable_units: dict[str, str],
     nominal_values_helpers: dict[str, float],
-    uncertainty_inputs_helpers: dict[str, dict],
+    uncertainty_inputs_helpers: dict[str, UncertaintyInput],
     measurand_symbol: str,
     measurand_name: str = "",
     measurand_unit: str = "",
@@ -1167,12 +1169,13 @@ def full_pipeline_regression_to_measurand(
         # L'incertitude composée du mesurande final peut donc être
         # sous-estimée tant que cette covariance n'est pas prise en compte.
         warnings.warn(
-            "full_pipeline_regression_to_measurand : theta0 et theta1 sont "
-            "tous deux utilisés dans le mesurande final mais traités comme "
-            "indépendants — la covariance entre les deux estimateurs de la "
-            "régression n'est pas modélisée. L'incertitude composée "
-            "obtenue peut être sous-estimée.",
+            "theta0 et theta1 traités comme indépendants — covariance OLS ignorée.",
             RuntimeWarning,
+            stacklevel=2,
+        )
+        print(
+            "\033[93m⚠ gum_calc : theta0 et theta1 sont corrélés (Cov ≠ 0 si x̄ ≠ 0). "
+            "L'incertitude composée peut être sous-estimée. Voir limitations.\033[0m"
         )
 
     reg      = linear_regression(x_data, y_data)
@@ -1180,13 +1183,15 @@ def full_pipeline_regression_to_measurand(
     inputs   = {**uncertainty_inputs_helpers}
 
     if "theta1" in variable_names:
-        nominals["theta1"]      = reg["theta1"]
-        inputs["theta1"]        = uncertainty_type_B_relative(reg["u_theta1"])
-        inputs["theta1"]["nu"]  = reg["nu"]
+        nominals["theta1"] = reg["theta1"]
+        inputs["theta1"]   = UncertaintyInput(
+            u=reg["u_theta1"], type="B", distribution="general", nu=reg["nu"]
+        )
     if "theta0" in variable_names:
-        nominals["theta0"]      = reg["theta0"]
-        inputs["theta0"]        = uncertainty_type_B_relative(reg["u_theta0"])
-        inputs["theta0"]["nu"]  = reg["nu"]
+        nominals["theta0"] = reg["theta0"]
+        inputs["theta0"]   = UncertaintyInput(
+            u=reg["u_theta0"], type="B", distribution="general", nu=reg["nu"]
+        )
 
     tex_reg = generate_bilan_regression(
         x_symbol, y_symbol, x_unit, y_unit, x_data, y_data,
@@ -1247,6 +1252,9 @@ def _parse_unit(unit_str: str) -> tuple[list, list]:
     déjà inversée par un appel précédent) est réinjectée dans un nouvel
     appel à `_divide_units` (chaîne de mesurandes).
 
+    Lève ValueError pour tout token non reconnu comme préfixe SI, token
+    de puissance, \\per, \\tothe{n} ou unité connue de _KNOWN_SIUNITX_UNITS.
+
     Limite documentée (non corrigée) : cette algèbre est purement
     symbolique sur le nom du token. \\kilo\\gram et \\gram sont deux clés
     différentes : aucune conversion numérique entre préfixes SI d'une même
@@ -1278,6 +1286,11 @@ def _parse_unit(unit_str: str) -> tuple[list, list]:
             if current:
                 current[-1][1] = int(m.group(1))
             continue
+        if t not in _KNOWN_SIUNITX_UNITS:
+            raise ValueError(
+                f"Token siunitx inconnu : {t!r}. "
+                "Vérifiez l'orthographe ou ajoutez-le à _KNOWN_SIUNITX_UNITS."
+            )
         current.append([pending_prefix + t, pending_power])
         pending_prefix, pending_power = "", 1
     return numerator, denominator
