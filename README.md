@@ -34,15 +34,24 @@ gum-calc/
 ## Fonctionnement global
 
 Le notebook template sert de référence, qui peut être adaptée pour chaque problème.
-Pour chaque TP, on duplique le notebook template et on remplit une cellule par mesurande. Chaque cellule suit la même structure :
+Pour chaque TP, deux solutions :
+- duplication du notebook template et on remplit une cellule par mesurande
+- usage de [Claude (Anthropic)](https://www.anthropic.com) à travers la compétence : "Skill gum-notebool.skill" 
 
-**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi `uncertainty_type_A` (répétition de mesures), `uncertainty_type_B_from_resolution` (résolution d'instrument), `uncertainty_type_B_uniform` (distribution uniforme connue), `uncertainty_type_B_relative` (incertitude déjà connue, par calibration ou propagée) et `uncertainty_type_exact` (constante).
+Chaque cellule suit la même structure :
+
+**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi : 
+- `uncertainty_type_A` (répétition de mesures)
+- `uncertainty_type_B_from_resolution` (résolution d'instrument)
+- `uncertainty_type_B_uniform` (distribution uniforme connue)
+- `uncertainty_type_B_relative` (incertitude déjà connue, par calibration ou propagée)
+- `uncertainty_type_exact` (constante).
 
 **Calcul GUM :** `full_gum_analysis` prend la formule du mesurande (en SymPy), les valeurs nominales et les incertitudes d'entrée, et renvoie le résultat propagé, l'incertitude composée `uc`, le facteur d'élargissement `k` (via Welch-Satterthwaite si nécessaire), l'incertitude élargie `U`, et le budget d'incertitudes.
 
 **Génération du bilan :** `generate_bilan` produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes-types détaillées, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
 
-**Export final :** `generate_annexe` assemble tous les bilans générés dans le notebook en une seule section LaTeX `\section{Annexe : Bilans d'incertitudes}`, à coller directement dans Overleaf.
+**Export final :** `generate_annexe` assemble tous les bilans générés dans le notebook en une seule section LaTeX `\section{Annexe : Bilans d'incertitudes}`. 
 
 **Toute modification du moteur de calcul (formules, arrondis, format LaTeX) se fait exclusivement dans `gum_calc.py`, jamais dans le notebook.**
 
@@ -269,6 +278,7 @@ bilan_reg = generate_bilan_regression(
     intercept_unit   = r"...",    # optionnel — égal à y_unit si absent
     slope_symbol     = r"\theta_1",
     intercept_symbol = r"\theta_0",
+    global_sig_figs  = 3,         # optionnel — chiffres significatifs des valeurs intermédiaires
 )
 ```
 
@@ -297,6 +307,7 @@ latex = full_pipeline_regression_to_measurand(
     measurand_unit             = r"...",
     slope_symbol               = r"\theta_1",
     intercept_symbol           = r"\theta_0",
+    global_sig_figs            = 3,       # optionnel — cohérence chiffres sig. régression + GUM
 )
 print(latex)
 ```
@@ -320,5 +331,3 @@ res_Y = full_gum_analysis(...)
 ```
 
 > Ne jamais passer `res_X["U"]` — ce serait appliquer k deux fois.
-
----
