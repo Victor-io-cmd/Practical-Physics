@@ -1,5 +1,7 @@
 # gum-calc
 
+> 🇬🇧 [English version](README.en.md)
+
 Moteur de calcul d'incertitudes GUM pour comptes rendus de TP de physique expérimentale, avec export LaTeX.
 
 ---
@@ -36,11 +38,11 @@ gum-calc/
 Le notebook template sert de référence, qui peut être adaptée pour chaque problème.
 Pour chaque TP, deux solutions :
 - duplication du notebook template et on remplit une cellule par mesurande
-- usage de [Claude (Anthropic)](https://www.anthropic.com) à travers la compétence : "Skill gum-notebool.skill" 
+- usage de [Claude (Anthropic)](https://www.anthropic.com) à travers la compétence : "Skill gum-notebook.skill"
 
 Chaque cellule suit la même structure :
 
-**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi : 
+**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi :
 - `uncertainty_type_A` (répétition de mesures)
 - `uncertainty_type_B_from_resolution` (résolution d'instrument)
 - `uncertainty_type_B_uniform` (distribution uniforme connue)
@@ -49,9 +51,9 @@ Chaque cellule suit la même structure :
 
 **Calcul GUM :** `full_gum_analysis` prend la formule du mesurande (en SymPy), les valeurs nominales et les incertitudes d'entrée, et renvoie le résultat propagé, l'incertitude composée `uc`, le facteur d'élargissement `k` (via Welch-Satterthwaite si nécessaire), l'incertitude élargie `U`, et le budget d'incertitudes.
 
-**Génération du bilan :** `generate_bilan` produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes-types détaillées, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
+**Génération du bilan :** `generate_bilan` produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes source par source, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
 
-**Export final :** `generate_annexe` assemble tous les bilans générés dans le notebook en une seule section LaTeX `\section{Annexe : Bilans d'incertitudes}`. 
+**Export final :** `generate_annexe` assemble tous les bilans générés dans le notebook en une seule section LaTeX `\section{Annexe : Bilans d'incertitudes}`.
 
 **Toute modification du moteur de calcul (formules, arrondis, format LaTeX) se fait exclusivement dans `gum_calc.py`, jamais dans le notebook.**
 
