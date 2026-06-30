@@ -1,4 +1,4 @@
-# gum-calc
+# Practical-Physics
 
 > 🇬🇧 [English version](README.en.md)
 
