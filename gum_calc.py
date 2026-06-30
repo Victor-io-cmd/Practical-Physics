@@ -3,12 +3,16 @@ gum_calc.py — Moteur de calcul GUM + Export LaTeX
 
 LIMITATIONS CONNUES
 --------------------
-- Les grandeurs d'entrée d'une même formule sont supposées indépendantes :
-  aucune covariance n'est prise en compte dans `calculate_uncertainty`.
-  Cas le plus fréquent où cette hypothèse est mise en défaut : un
-  mesurande qui combine `theta0` et `theta1` issus de la même régression
-  linéaire (`full_pipeline_regression_to_measurand` émet alors un
-  `RuntimeWarning` explicite, voir cette fonction).
+- Les grandeurs d'entrée d'une même formule sont supposées indépendantes
+  par défaut : `calculate_uncertainty` ne prend en compte une covariance
+  entre deux entrées que si elle lui est explicitement fournie via le
+  paramètre `covariances` (GUM §5.2, formule 13). Le cas le plus fréquent
+  — un mesurande qui combine `theta0` et `theta1` issus de la même
+  régression linéaire — est traité automatiquement par
+  `full_pipeline_regression_to_measurand`, qui calcule la covariance OLS
+  analytique Cov(θ₀, θ₁) = -x̄·s²_res/Sxx et la transmet au pipeline.
+  Toute autre source de covariance (deux mesurandes distincts dérivés
+  d'une même régression, par exemple) reste à la charge de l'appelant.
 - La propagation est strictement linéaire au premier ordre (dérivées
   partielles à la valeur nominale) : pas d'alternative Monte-Carlo
   (GUM Supplément 1) pour les modèles fortement non linéaires.
@@ -43,6 +47,10 @@ _KNOWN_SIUNITX_UNITS = {
     r"\farad", r"\henry", r"\tesla", r"\becquerel", r"\gray",
     r"\lumen", r"\lux", r"\radian", r"\steradian",
 }
+
+# Seuil d'incertitude relative u(xi)/|xi| au-delà duquel la propagation au
+# premier ordre (GUM §5.1.2) risque de sous-estimer u_c de façon notable.
+_NONLINEARITY_RELATIVE_THRESHOLD = 0.10
 
 
 @dataclass
@@ -186,6 +194,12 @@ def uncertainty_type_B_relative(u_standard: float,
                 f"— valeur reçue : {relative_knowledge}. "
                 "Une connaissance relative négative est physiquement absurde."
             )
+        elif relative_knowledge > 1:
+            raise ValueError(
+                "uncertainty_type_B_relative : relative_knowledge doit être dans ]0, 1] "
+                f"— valeur reçue : {relative_knowledge}. "
+                "Une connaissance relative à plus de 100% est physiquement absurde."
+            )
         elif relative_knowledge > 0:
             nu = 1.0 / (2.0 * relative_knowledge ** 2)
     return UncertaintyInput(u=u_standard, type="B", distribution="general", nu=nu)
@@ -218,6 +232,7 @@ def calculate_uncertainty(
     variable_names: list[str],
     nominal_values: dict[str, float],
     uncertainty_inputs: dict[str, UncertaintyInput],
+    covariances: dict[tuple[str, str], float] = None,
 ) -> dict:
     """
     Propagation GUM par dérivation symbolique (SymPy).
@@ -231,15 +246,29 @@ def calculate_uncertainty(
     variable_names    : liste ordonnée des noms de variables.
     nominal_values    : dict {nom: valeur nominale}.
     uncertainty_inputs: dict {nom: UncertaintyInput}.
+    covariances       : dict optionnel {(nom_i, nom_j): u(x_i, x_j)} pour
+                        toute paire d'entrées corrélées (GUM §5.2, formule
+                        13). Chaque paire ajoute un terme croisé
+                        2·c_i·c_j·u(x_i, x_j) à la variance composée. Les
+                        entrées non listées ici restent supposées
+                        indépendantes. Cas d'usage typique : deux
+                        paramètres `theta0`/`theta1` issus de la même
+                        régression OLS, dont la covariance analytique est
+                        fournie automatiquement par
+                        `full_pipeline_regression_to_measurand`.
 
     Retourne un dict avec :
-      result          — valeur nominale du mesurande
-      uc              — incertitude-type composée
-      uc_squared      — variance composée
-      sensitivities   — dict {nom: c_i} coefficients de sensibilité
-      contributions   — dict {nom: c_i² * u_i²} contributions à la variance
-      budget          — dict {nom: % de la variance composée}
-      partial_derivs  — dict {nom: expression SymPy de ∂f/∂x_i}
+      result            — valeur nominale du mesurande
+      uc                — incertitude-type composée (covariances incluses)
+      uc_squared         — variance composée (covariances incluses)
+      sensitivities      — dict {nom: c_i} coefficients de sensibilité
+      contributions      — dict {nom: c_i² * u_i²} contributions diagonales
+      covariance_terms   — dict {(nom_i, nom_j): 2·c_i·c_j·u(x_i,x_j)}
+      budget             — dict {nom: % de la variance composée} — calculé
+                            sur la variance composée totale (diagonale +
+                            croisée), donc ne somme à 100 % que si
+                            `covariances` est vide.
+      partial_derivs     — dict {nom: expression SymPy de ∂f/∂x_i}
     """
     if not variable_names:
         raise ValueError(
@@ -267,13 +296,27 @@ def calculate_uncertainty(
 
     def _safe_float(expr, context: str) -> float:
         """Convertit une expression SymPy en float avec un message d'erreur explicite."""
-        # evaluated est assigné AVANT le try : si expr.subs() lève TypeError,
-        # le except peut l'inspecter sans risque de NameError secondaire.
-        evaluated = expr.subs(subs)
+        nom_str = ", ".join(f"{n}={nominal_values[n]}" for n in variable_names)
+
+        def _fail(detail: str, exc=None):
+            raise ValueError(
+                f"Impossible d'évaluer {context} au point nominal "
+                f"({{{nom_str}}}). Cause : {detail}."
+            ) from exc
+
+        # expr.subs() peut lui-même lever (pôle exact rencontré pendant la
+        # substitution symbolique, avant même la conversion en float) : ce
+        # cas n'était pas couvert par le try précédent, qui ne portait que
+        # sur float(evaluated).
         try:
-            return float(evaluated)
-        except (TypeError, ValueError) as exc:
-            if evaluated.is_infinite:
+            evaluated = expr.subs(subs)
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+            _fail(str(exc), exc)
+
+        try:
+            value = float(evaluated)
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+            if getattr(evaluated, "is_infinite", False):
                 detail = "singularité (division par zéro ou pôle)"
             elif getattr(evaluated, "is_nan", False):
                 detail = "valeur indéfinie (NaN SymPy)"
@@ -281,11 +324,14 @@ def calculate_uncertainty(
                 detail = f"symbole(s) résiduel(s) : {evaluated.free_symbols}"
             else:
                 detail = str(exc)
-            nom_str = ", ".join(f"{n}={nominal_values[n]}" for n in variable_names)
-            raise ValueError(
-                f"Impossible d'évaluer {context} au point nominal "
-                f"({{{nom_str}}}). Cause : {detail}."
-            ) from exc
+            _fail(detail, exc)
+
+        # float() peut convertir sp.oo/zoo sans lever (selon la forme
+        # algébrique) en renvoyant silencieusement math.inf, qui se
+        # propagerait ensuite en NaN dans le budget d'incertitude.
+        if not math.isfinite(value):
+            _fail("singularité (résultat non fini au point nominal)")
+        return value
 
     result = _safe_float(formula, "la formule")
 
@@ -301,9 +347,51 @@ def calculate_uncertainty(
     for name in variable_names:
         ci = sensitivities[name]
         ui = uncertainty_inputs[name].u
+        xi = nominal_values[name]
+        # Garde GUM §5.1.2 : le modèle de propagation est strictement au
+        # premier ordre. Une incertitude relative importante sur une
+        # entrée (typiquement u(T)/T ~ 20% en rayonnement de
+        # Stefan-Boltzmann) peut faire sous-estimer u_c de plusieurs
+        # dizaines de % sans qu'aucun signal ne soit donné à l'utilisateur.
+        if xi != 0 and ui / abs(xi) > _NONLINEARITY_RELATIVE_THRESHOLD:
+            warnings.warn(
+                f"calculate_uncertainty : u({name})/|{name}| = "
+                f"{ui / abs(xi):.1%} dépasse le seuil de "
+                f"{_NONLINEARITY_RELATIVE_THRESHOLD:.0%} — l'approximation "
+                "linéaire (GUM §5.1.2) peut sous-estimer significativement "
+                "u_c pour cette grandeur. Envisagez une approche Monte-Carlo "
+                "(GUM Supplément 1) si la non-linéarité du modèle est forte.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         contrib = ci ** 2 * ui ** 2
         contributions[name] = contrib
         uc_squared += contrib
+
+    # Termes croisés GUM (§5.2, formule 13) : 2·c_i·c_j·u(x_i, x_j) pour
+    # chaque paire d'entrées déclarée corrélée. N'affecte que les paires
+    # explicitement fournies — toute paire absente de `covariances` reste
+    # traitée comme indépendante (terme nul).
+    covariance_terms = {}
+    for (name_i, name_j), cov_ij in (covariances or {}).items():
+        if name_i not in variable_names or name_j not in variable_names:
+            raise ValueError(
+                f"calculate_uncertainty : covariance déclarée pour "
+                f"({name_i!r}, {name_j!r}) mais l'une de ces variables "
+                f"n'est pas dans variable_names={variable_names}."
+            )
+        term = 2.0 * sensitivities[name_i] * sensitivities[name_j] * cov_ij
+        covariance_terms[(name_i, name_j)] = term
+        uc_squared += term
+
+    if uc_squared < 0:
+        raise ValueError(
+            "calculate_uncertainty : variance composée négative après prise "
+            "en compte des covariances fournies — au moins une covariance "
+            "dépasse la borne de Cauchy-Schwarz u(x_i,x_j) <= u(x_i)*u(x_j) "
+            "et n'est donc pas physiquement valide. Vérifiez les valeurs "
+            "passées à `covariances`."
+        )
 
     uc = math.sqrt(uc_squared)
 
@@ -318,6 +406,7 @@ def calculate_uncertainty(
         "uc_squared": uc_squared,
         "sensitivities": sensitivities,
         "contributions": contributions,
+        "covariance_terms": covariance_terms,
         "budget": budget,
         "partial_derivs": partial_derivs,
     }
@@ -356,8 +445,21 @@ def welch_satterthwaite(
         k      = 2.0
     else:
         nu_eff = (uc_squared ** 2) / denominator
-        k      = scipy_stats.t.ppf(0.975, df=nu_eff)
-        k      = round(k, 3)
+        k_raw  = scipy_stats.t.ppf(0.975, df=nu_eff)
+        if not math.isfinite(k_raw):
+            warnings.warn(
+                f"welch_satterthwaite : facteur k non fini (nu_eff={nu_eff:.3g}). "
+                "Les degrés de liberté effectifs sont anormalement proches de 0 — "
+                "on retombe sur k = 2.0 par sécurité. Vérifiez les nu fournis.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            k = 2.0
+        else:
+            # _round_half_up (et non round(), qui applique l'arrondi bancaire
+            # Python) pour rester cohérent avec la convention utilisée
+            # partout ailleurs dans le module.
+            k = _round_half_up(k_raw, 0.001)
 
     return {"nu_eff": nu_eff, "k": k}
 
@@ -383,6 +485,7 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
     Retourne un dict avec :
       theta0, theta1     — estimateurs OLS
       u_theta0, u_theta1 — incertitudes-types associées
+      cov_theta01        — covariance OLS Cov(θ₀, θ₁) = -x̄·s²_res/Sxx
       s_res              — écart-type résiduel
       r2                 — coefficient de détermination R²
       N, nu              — nombre de points et degrés de liberté (N - 2)
@@ -415,7 +518,18 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
     sxy = sum(xi * yi for xi, yi in zip(xc, yc))
 
     if sxx == 0:
-        raise ValueError("Déterminant nul : toutes les valeurs xi sont identiques.")
+        if len(set(x_data)) == 1:
+            raise ValueError("Déterminant nul : toutes les valeurs xi sont identiques.")
+        # sxx==0 avec des xi pourtant distincts : ce n'est pas une erreur
+        # de saisie mais une cancellation catastrophique IEEE 754 — à grand
+        # offset commun (ex. 1e15), des xi distincts deviennent
+        # indiscernables en double précision dans la somme Σ(xi-x̄)².
+        raise ValueError(
+            "Déterminant nul : les valeurs xi sont distinctes mais leur écart "
+            "est noyé par un offset commun trop grand pour la précision "
+            "flottante (double précision IEEE 754). Soustrayez un offset "
+            "commun aux données (ex. x_data - x_data[0]) avant la régression."
+        )
 
     theta1 = sxy / sxx
     theta0 = y_mean - theta1 * x_mean
@@ -443,15 +557,43 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
     # numériquement équivalentes aux formes classiques mais plus stables.
     u_theta1 = math.sqrt(s2_res / sxx)
     u_theta0 = math.sqrt(s2_res * (1.0 / N + x_mean ** 2 / sxx))
+    if not (math.isfinite(u_theta0) and math.isfinite(u_theta1)):
+        raise ValueError(
+            "linear_regression : incertitude non finie sur theta0/theta1 — "
+            "cancellation numérique sévère sur Sxx (offset des données trop "
+            "grand devant leur dispersion). Centrez ou réduisez l'offset des "
+            "données avant la régression."
+        )
 
     ss_res = sum(r ** 2 for r in residuals)
-    r2     = 1.0 - ss_res / syy if syy > 0 else 1.0
+    if syy > 0:
+        r2 = 1.0 - ss_res / syy
+    else:
+        # Toutes les yi identiques : r2=1.0 afficherait un ajustement
+        # "parfait" trompeur, alors que la régression est triviale et sans
+        # pouvoir prédictif. NaN signale explicitement l'indétermination.
+        warnings.warn(
+            "linear_regression : toutes les valeurs yi sont identiques "
+            "(syy=0) — r² n'a pas de sens prédictif, fixé à NaN.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        r2 = float("nan")
+
+    # Cov(θ₀, θ₁) = -x̄ · s²_res / Sxx — covariance OLS analytique standard
+    # pour la régression linéaire simple (θ₀ = ȳ - θ₁x̄ et Var(θ₁) = s²/Sxx
+    # donnent directement ce résultat). Exposée pour permettre à l'appelant
+    # de propager correctement un mesurande combinant θ₀ et θ₁ (voir
+    # `full_pipeline_regression_to_measurand`) plutôt que de les traiter à
+    # tort comme indépendants.
+    cov_theta01 = -x_mean * s2_res / sxx
 
     return {
         "theta0": theta0,
         "theta1": theta1,
         "u_theta0": u_theta0,
         "u_theta1": u_theta1,
+        "cov_theta01": cov_theta01,
         "s_res": math.sqrt(s2_res),
         "r2": r2,
         "N": N,
@@ -490,6 +632,11 @@ def round_to_sig_figs(value: float, sig_figs: int) -> float:
     Arrondit value à sig_figs chiffres significatifs (voir _round_half_up
     pour la convention d'arrondi retenue).
     """
+    if not math.isfinite(value):
+        raise ValueError(
+            f"round_to_sig_figs : value non finie ({value}) — impossible "
+            "de calculer une magnitude décimale (math.log10 diverge)."
+        )
     if value == 0:
         return 0.0
     magnitude = math.floor(math.log10(abs(value)))
@@ -507,6 +654,18 @@ def format_result(result: float, U: float, sig_figs_exact: int = 4) -> dict:
     `result_rounded` (notebook, print de débogage...) sans repasser par
     `_format_result_uncertainty` recevrait la précision flottante brute.
     """
+    if not math.isfinite(result):
+        raise ValueError(
+            f"format_result : result non fini ({result}). Une formule "
+            "évaluée à une singularité (pôle, division par zéro) ne peut "
+            "pas être arrondie ni affichée."
+        )
+    if not math.isfinite(U):
+        raise ValueError(
+            f"format_result : U non finie ({U}). Cela indique typiquement "
+            "des degrés de liberté effectifs anormalement proches de 0 "
+            "(relative_knowledge mal renseigné, cf. uncertainty_type_B_relative)."
+        )
     U_rounded = round_to_sig_figs(U, 2)
     if U_rounded == 0:
         result_rounded = round_to_sig_figs(result, sig_figs_exact) if result != 0 else 0.0
@@ -531,6 +690,7 @@ def full_gum_analysis(
     uncertainty_inputs: dict[str, UncertaintyInput],
     k_override: float = None,
     global_sig_figs: int = 4,
+    covariances: dict[tuple[str, str], float] = None,
 ) -> MappingProxyType:
     """
     Pipeline GUM complet : propagation + Welch-Satterthwaite + formatage.
@@ -545,9 +705,16 @@ def full_gum_analysis(
     comportement historique pour tout appel direct de cette fonction hors
     de `generate_bilan` ; ce dernier transmet son propre `global_sig_figs`
     pour rester cohérent avec le reste du bilan affiché.
+
+    `covariances` est transmis tel quel à `calculate_uncertainty` (voir sa
+    docstring) : Welch-Satterthwaite reste calculé à partir des
+    contributions diagonales uniquement (la formule classique ne se
+    généralise pas simplement aux covariances), ce qui reste l'approche
+    standard en présence d'un nombre réduit de paires corrélées.
     """
     calc = calculate_uncertainty(
-        formula_str, variable_names, nominal_values, uncertainty_inputs
+        formula_str, variable_names, nominal_values, uncertainty_inputs,
+        covariances=covariances,
     )
     ws = welch_satterthwaite(
         variable_names,
@@ -565,6 +732,7 @@ def full_gum_analysis(
         "uc_squared":      calc["uc_squared"],
         "sensitivities":   MappingProxyType(calc["sensitivities"]),
         "contributions":   MappingProxyType(calc["contributions"]),
+        "covariance_terms": MappingProxyType(calc["covariance_terms"]),
         "budget":          MappingProxyType(calc["budget"]),
         "partial_derivs":  MappingProxyType(calc["partial_derivs"]),
         "nu_eff":          ws["nu_eff"],
@@ -623,6 +791,22 @@ def _escape_latex(s: str) -> str:
     return "".join(_LATEX_SPECIAL_CHARS.get(c, c) for c in s)
 
 
+def _magnitude_of(value: float) -> int:
+    """
+    Magnitude décimale floor(log10(|value|)) robuste à l'instabilité de
+    représentation flottante près d'une puissance de 10 exacte
+    (ex: log10(10.0) peut valoir 0.999999999... en double précision).
+
+    Source unique partagée par `_mantissa_exp` et `_format_magnitude` :
+    centraliser ce calcul évite toute divergence entre les deux branches
+    de rendu (décimale vs scientifique) pour une même valeur arrondie.
+    """
+    mag = math.floor(math.log10(abs(value)))
+    if abs(value) / (10 ** mag) >= 10:
+        mag += 1
+    return mag
+
+
 def _mantissa_exp(value: float, sig: int):
     """
     Décompose value en (signe, mantisse, exposant) pour la notation
@@ -637,7 +821,7 @@ def _mantissa_exp(value: float, sig: int):
         return "", 0.0, 0
     rounded  = round_to_sig_figs(value, sig)
     sign     = "-" if rounded < 0 else ""
-    mag      = math.floor(math.log10(abs(rounded)))
+    mag      = _magnitude_of(rounded)
     mantissa = abs(rounded) / (10 ** mag)
     # Garde-fou « retenue » : un arrondi peut faire passer la mantisse à
     # 10.000 pile (ex: 9.996 arrondi à 3 c.s. -> 10.0), ce qui violerait
@@ -704,7 +888,7 @@ def _format_magnitude(value: float, sig: int) -> str:
     value = round_to_sig_figs(value, sig)
     if value == 0:
         return "0"
-    mag  = math.floor(math.log10(abs(value)))
+    mag  = _magnitude_of(value)
     if _SCI_NOTATION_MAG_MIN <= mag <= _SCI_NOTATION_MAG_MAX:
         decimals = max(0, sig - 1 - mag)
         return f"{value:.{decimals}f}"
@@ -1032,13 +1216,19 @@ def _bilan_propagation_block(
             continue
         ci = res["sensitivities"][n]
         ui = uncertainty_inputs[n].u
+        if ci == 0:
+            # Sensibilité nulle au point nominal : contribution nulle à la
+            # variance, terme purement cosmétique à exclure (même
+            # traitement que les grandeurs "exact").
+            continue
         inner_terms.append(
             rf"({_sci(ci, sig=global_sig_figs)})^2 \, ({_num(ui, sig=global_sig_figs)})^2"
         )
 
     if not inner_terms:
         lines.append(
-            rf"\noindent Toutes les grandeurs d'entrée étant des constantes exactes, "
+            rf"\noindent Toutes les grandeurs d'entrée sont soit des constantes "
+            rf"exactes, soit de sensibilité nulle au point nominal, "
             rf"l'incertitude-type composée est nulle : $u_c({measurand_symbol}) = 0$."
         )
         lines.append(r"\newline")
@@ -1089,10 +1279,9 @@ def _bilan_ws_block(
     Génère : le bloc WS (formule + table de Student) si nu_eff est fini,
     sinon la phrase pour k = 2.00 classique.
 
-    Fix Bug 2 : garde défensive sur `descriptions` avant join —
-    ne peut pas être vide quand nu_eff est fini (même conditions que
-    welch_satterthwaite), mais protège contre toute divergence future
-    entre les deux fonctions.
+    Garde défensive sur `descriptions` avant join : ne peut pas être vide
+    quand nu_eff est fini (même critère que welch_satterthwaite), mais
+    protège contre toute divergence future entre les deux fonctions.
     """
     lines  = []
     nu_eff = res.get("nu_eff", float("inf"))
@@ -1112,10 +1301,10 @@ def _bilan_ws_block(
             if not math.isfinite(nu_i) or abs(ci * ui) == 0:
                 continue
             nu_lines.append(
-                rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{{int(nu_i)}}}"
+                rf"\dfrac{{({_sci(ci, sig=global_sig_figs)} \cdot {_num(ui, sig=global_sig_figs)})^4}}{{{round(nu_i)}}}"
             )
             type_str = "type~A" if uncertainty_inputs[n].type == "A" else "type~B"
-            descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {int(nu_i)}$)")
+            descriptions.append(rf"${sym_map[n]}$ ({type_str}, $\nu = {round(nu_i)}$)")
 
         # Garde défensive : ne devrait pas être vide si nu_eff est fini,
         # mais on évite IndexError en cas de divergence future entre les conditions.
@@ -1251,6 +1440,7 @@ def generate_bilan(
     k_override: float = None,
     subsection: bool = True,
     global_sig_figs: int = 3,
+    covariances: dict[tuple[str, str], float] = None,
     _res_precomputed=None,
 ) -> str:
     """
@@ -1261,7 +1451,8 @@ def generate_bilan(
     de relancer tout le calcul symbolique quand le notebook appelant a déjà
     besoin du résultat numérique en amont (affichage console, chaînage vers
     un autre mesurande). La validation des entrées a alors déjà eu lieu lors
-    de ce premier appel ; elle n'est pas refaite ici.
+    de ce premier appel ; elle n'est pas refaite ici. Dans ce cas,
+    `covariances` est ignoré (déjà pris en compte dans `_res_precomputed`).
 
     Le corps délègue entièrement à 6 sous-fonctions privées (_bilan_*_block),
     chacune responsable d'un bloc sémantique indépendant. generate_bilan
@@ -1269,7 +1460,7 @@ def generate_bilan(
     """
     res     = _res_precomputed if _res_precomputed is not None else full_gum_analysis(
         formula_str, variable_names, nominal_values, uncertainty_inputs, k_override,
-        global_sig_figs=global_sig_figs,
+        global_sig_figs=global_sig_figs, covariances=covariances,
     )
     sym_map  = {n: variable_symbols.get(n, n) for n in variable_names}
     unit_map = {n: variable_units.get(n, "")  for n in variable_names}
@@ -1338,43 +1529,59 @@ def full_pipeline_regression_to_measurand(
     slope_symbol: str = r"\theta_1",
     intercept_symbol: str = r"\theta_0",
     global_sig_figs: int = 3,
+    couple_theta0: bool = False,
+    couple_theta1: bool = False,
 ) -> str:
     """
     Génère d'un seul appel le LaTeX complet : régression + propagation GUM.
+
+    `couple_theta0` / `couple_theta1` déclarent explicitement que le
+    mesurande dépend de `theta0` / `theta1` issus de la régression : ceci
+    remplace l'ancienne détection implicite par `"theta0" in
+    variable_names`, qui débranchait silencieusement la covariance en cas
+    de faute de frappe dans `variable_names`. Si l'un des deux drapeaux est
+    `True` mais que le symbole correspondant est absent de
+    `variable_names`, une `ValueError` est levée immédiatement plutôt que
+    de laisser l'erreur passer inaperçue.
+
+    Quand les deux paramètres dépendent de la régression
+    (`couple_theta0=couple_theta1=True`), la covariance OLS analytique
+    Cov(θ₀, θ₁) — calculée par `linear_regression`, voir sa docstring — est
+    transmise à `generate_bilan` via `covariances`, conformément au GUM
+    §5.2 (formule 13) : l'incertitude composée n'est donc plus
+    systématiquement sous-estimée par hypothèse d'indépendance.
     """
-    theta0_used = "theta0" in variable_names
-    theta1_used = "theta1" in variable_names
-    if theta0_used and theta1_used:
-        warnings.warn(
-            "theta0 et theta1 traités comme indépendants — covariance OLS ignorée. "
-            "L'incertitude composée peut être sous-estimée si x̄ ≠ 0. Voir limitations.",
-            RuntimeWarning,
-            stacklevel=2,
+    if couple_theta0 and "theta0" not in variable_names:
+        raise ValueError(
+            "full_pipeline_regression_to_measurand : couple_theta0=True mais "
+            "'theta0' n'apparaît pas dans variable_names="
+            f"{variable_names}. Corrigez variable_names ou couple_theta0."
         )
-    elif theta0_used or theta1_used:
-        used = "theta0" if theta0_used else "theta1"
-        warnings.warn(
-            f"{used!r} est un estimateur OLS corrélé à son complémentaire par construction. "
-            "La covariance avec l'autre paramètre de régression est ignorée — "
-            "l'incertitude composée peut être sous-estimée si x̄ ≠ 0. Voir limitations.",
-            RuntimeWarning,
-            stacklevel=2,
+    if couple_theta1 and "theta1" not in variable_names:
+        raise ValueError(
+            "full_pipeline_regression_to_measurand : couple_theta1=True mais "
+            "'theta1' n'apparaît pas dans variable_names="
+            f"{variable_names}. Corrigez variable_names ou couple_theta1."
         )
 
     reg      = linear_regression(x_data, y_data)
     nominals = {**nominal_values_helpers}
     inputs   = {**uncertainty_inputs_helpers}
 
-    if "theta1" in variable_names:
+    if couple_theta1:
         nominals["theta1"] = reg["theta1"]
         inputs["theta1"]   = UncertaintyInput(
             u=reg["u_theta1"], type="B", distribution="general", nu=reg["nu"]
         )
-    if "theta0" in variable_names:
+    if couple_theta0:
         nominals["theta0"] = reg["theta0"]
         inputs["theta0"]   = UncertaintyInput(
             u=reg["u_theta0"], type="B", distribution="general", nu=reg["nu"]
         )
+
+    covariances = None
+    if couple_theta0 and couple_theta1:
+        covariances = {("theta0", "theta1"): reg["cov_theta01"]}
 
     tex_reg = generate_bilan_regression(
         x_symbol, y_symbol, x_unit, y_unit, x_data, y_data,
@@ -1398,6 +1605,7 @@ def full_pipeline_regression_to_measurand(
         measurand_unit=measurand_unit,
         subsection=True,
         global_sig_figs=global_sig_figs,
+        covariances=covariances,
     )
 
     return tex_reg + "\n\n\\clearpage\n\n" + tex_gum
