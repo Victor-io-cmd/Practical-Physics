@@ -38,7 +38,7 @@ gum-calc/
 Le notebook template sert de référence, qui peut être adaptée pour chaque problème.
 Pour chaque TP, deux solutions :
 - duplication du notebook template et on remplit une cellule par mesurande
-- usage de [Claude (Anthropic)](https://www.anthropic.com) à travers la compétence : "Skill gum-notebook.skill"
+- usage de [Claude (Anthropic)](https://www.anthropic.com) à travers la compétence : "CLAUDE_SKILL gum-notebook.skill"
 
 Chaque cellule suit la même structure :
 
