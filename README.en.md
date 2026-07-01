@@ -38,7 +38,7 @@ gum-calc/
 The template notebook serves as a reference that can be adapted for each problem.
 For each lab session, two options:
 - duplicate the template notebook and fill in one cell per measurand
-- use [Claude (Anthropic)](https://www.anthropic.com) through the skill: "Skill gum-notebook.skill"
+- use [Claude (Anthropic)](https://www.anthropic.com) through the skill: "CLAUDE_SKILL gum-notebook.skill"
 
 Each cell follows the same structure:
 
