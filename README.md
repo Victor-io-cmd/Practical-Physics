@@ -1,333 +1,91 @@
 # gum-calc
 
-Moteur de calcul d'incertitudes GUM pour comptes rendus de TP de physique expérimentale, avec export LaTeX.
+A calculation engine that turns raw lab measurements into a fully formatted uncertainty analysis, ready to paste into a LaTeX report.
 
 ---
 
-## Auteur
+## What this is
 
-**Victorio BONNEVILLE DIAZ** — Étudiant L3 Physique Générale, UPEC (Université Paris-Est Créteil)
+In experimental physics, every measurement comes with uncertainty, and every lab report needs a rigorous section explaining where that uncertainty comes from and how it propagates through the final result. This process follows an international standard called the **GUM** (Guide to the Expression of Uncertainty in Measurement), and doing it by hand for every quantity in a report is slow, repetitive, and error-prone: one skipped derivative or one misapplied rounding rule can silently produce a wrong result.
 
-Code généré avec [Claude (Anthropic)](https://www.anthropic.com) à partir d'une architecture et d'une logique définies par l'auteur, sur la base des cours de métrologie GUM de L2 Physique de l'Université de Paris-Est Créteil.
+`gum-calc` automates that entire pipeline. Give it a formula, some measured values, and how each value was obtained (repeated measurements, instrument resolution, manufacturer tolerance...), and it returns the propagated result together with a ready-to-use LaTeX writeup: the measurement model, the sensitivity coefficients, the uncertainty budget, and the final result correctly rounded.
 
----
-
-## Contexte
-
-Ce projet a pour but de simplifier et d'automatiser les calculs d'incertitudes pour des comptes rendus de travaux pratiques, à travers un moteur de calcul et un export LaTeX.
-
-Le moteur est conforme à la norme **GUM** (*Guide to the Expression of Uncertainty in Measurement*). Il couvre les incertitudes de types A et B, la propagation par dérivation via SymPy, le facteur d'élargissement par la formule de Welch-Satterthwaite, et la régression linéaire par moindres carrés.
+I built this for my own physics lab reports as an L3 Physics student at UPEC (Université Paris-Est Créteil), and I use it every time I need to write an uncertainty section.
 
 ---
 
-## Structure du projet
+## Author
+
+**Victorio BONNEVILLE DIAZ** — L3 Physics student, UPEC (Université Paris-Est Créteil)
+
+Code generated with [Claude (Anthropic)](https://www.anthropic.com) from an architecture and logic defined by the author, based on the GUM metrology coursework from L2 Physics at Université Paris-Est Créteil.
+
+---
+
+## Project structure
 
 ```
 gum-calc/
 ├── GUM - Measurement Uncertainties.ipynb   # Notebook template
-├── gum_calc.py                           # Moteur de calcul et export LaTeX
+├── gum_calc.py                             # Calculation engine and LaTeX export
 └── README.md
 ```
 
 ---
 
-## Fonctionnement global
+## Technology
 
-Le notebook template sert de référence, qui peut être adaptée pour chaque problème.
-Pour chaque TP, deux solutions :
-- duplication du notebook template et on remplit une cellule par mesurande
-- usage de [Claude (Anthropic)](https://www.anthropic.com) à travers la compétence : "CLAUDE_SKILL gum-notebook.skill"
-
-Chaque cellule suit la même structure :
-
-**Incertitudes d'entrée :** pour chaque grandeur mesurée, on choisit le type d'incertitude adapté parmi :
-- `uncertainty_type_A` (répétition de mesures)
-- `uncertainty_type_B_from_resolution` (résolution d'instrument)
-- `uncertainty_type_B_uniform` (distribution uniforme connue)
-- `uncertainty_type_B_relative` (incertitude déjà connue, par calibration ou propagée)
-- `uncertainty_type_exact` (constante).
-
-**Calcul GUM :** `full_gum_analysis` prend la formule du mesurande (en SymPy), les valeurs nominales et les incertitudes d'entrée, et renvoie le résultat propagé, l'incertitude composée `uc`, le facteur d'élargissement `k` (via Welch-Satterthwaite si nécessaire), l'incertitude élargie `U`, et le budget d'incertitudes.
-
-**Génération du bilan :** `generate_bilan` produit le bloc LaTeX correspondant (modèle de mesure, valeurs nominales, incertitudes source par source, coefficients de sensibilité, budget, résultat encadré), prêt à être utilisé dans le rapport.
-
-**Export final :** `generate_annexe` assemble tous les bilans générés dans le notebook en une seule section LaTeX `\section{Annexe : Bilans d'incertitudes}`.
-
-**Toute modification du moteur de calcul (formules, arrondis, format LaTeX) se fait exclusivement dans `gum_calc.py`, jamais dans le notebook.**
+- **Python** for the calculation engine
+- **SymPy** for symbolic differentiation — the engine computes exact partial derivatives of any formula instead of relying on hardcoded propagation formulas
+- **SciPy** for the Student's t-distribution table, used in the Welch-Satterthwaite widening factor
+- **LaTeX / siunitx** as the output format, so the result can be pasted directly into a report compiled in Overleaf
+- **Jupyter Notebook** as the working environment, one cell per measured quantity
 
 ---
 
-## Installation et configuration
+## Features
 
-Bibliothèques utilisées :
+**Uncertainty typing.** Five functions cover the standard GUM cases: repeated measurements (type A), instrument resolution or known tolerance (type B), a directly known standard uncertainty (for example, propagated from a previous calculation), and exact constants.
 
-- `sympy` — dérivation symbolique des coefficients de sensibilité
-- `scipy` — table de Student pour le facteur d'élargissement (Welch-Satterthwaite)
-- `math` et `re` — calculs numériques et parsing d'unités (bibliothèques standard Python)
-- `jupyter` — environnement d'exécution du notebook template
+**Symbolic propagation.** The core function takes a formula as plain text (like `"U / I"`), parses it with SymPy, and differentiates it automatically with respect to every variable. This is what removes the need to derive propagation formulas by hand for every new measurand.
 
-Installation des dépendances :
+**Welch-Satterthwaite widening factor.** When uncertainty sources of different reliability are combined (a well-known type B source alongside a type A source estimated from only a few measurements), the engine computes the effective degrees of freedom and reads the correct widening factor `k` from the Student's t table, instead of always assuming `k = 2`.
 
-```bash
-pip install sympy scipy jupyter
-```
+**Linear regression with covariance.** Ordinary least squares fitting that also returns the covariance between the slope and intercept, a quantity that is almost always forgotten in hand calculations but that matters whenever a final result depends on both.
 
-**Configuration du chemin dans le notebook :**
+**Correct rounding, every time.** The uncertainty always decides the number of significant digits shown for the result, never the other way around — one of the most common mistakes in lab reports. This rule lives in a single function so it can never be applied inconsistently across a report.
 
-En tête du notebook, la ligne suivante pointe vers le dossier contenant `gum_calc.py`. À adapter selon votre machine :
+**LaTeX generation.** Full write-ups using the `siunitx` package: the measurement model, a description of each uncertainty source, the sensitivity coefficients, the Welch-Satterthwaite step when relevant, the uncertainty budget, and the boxed final result. Multiple write-ups can be assembled into a single appendix section.
 
-```python
-import sys
-sys.path.insert(0, r"C:\chemin\vers\gum-calc")
-```
-
-**Versions testées :** Python 3.11.9 · SymPy 1.14.0 · SciPy 1.17.1
+**Fails loudly, not silently.** Nearly every function checks its own inputs before calculating anything, and raises a precise error describing exactly what is wrong, rather than letting a bad value slip through and produce a wrong number in a report.
 
 ---
 
-## Étape 1 — Déclarer les incertitudes
+## The process
 
-Avant de calculer quoi que ce soit, on caractérise chaque grandeur d'entrée par son incertitude-type. `gum_calc.py` propose cinq fonctions selon la situation. Les types valides reconnus par l'export LaTeX sont `"exact"`, `"A"` et `"B"` — tout autre type lève une `ValueError` explicite.
+The project started from a real, recurring problem: rewriting the same uncertainty calculations and the same LaTeX blocks for every TP, with the same risk of making a rounding or propagation mistake each time.
 
----
+I designed the architecture and the calculation logic myself, based on the GUM metrology course from L2 Physics at UPEC: which uncertainty types exist, how propagation and widening are supposed to work, and what a correct uncertainty budget looks like. From there, I worked with Claude (Anthropic) to translate that logic into working Python — writing the SymPy-based propagation engine, the LaTeX formatting layer, and the regression pipeline, then testing edge cases against what the GUM actually prescribes.
 
-### Incertitude de type A
-
-L'incertitude de type A s'applique quand on dispose d'une série de mesures répétées de la même grandeur. On exploite la dispersion statistique : l'incertitude-type est l'écart-type de la moyenne, soit
-
-```
-u_A = s / √N
-```
-
-où `s` est l'écart-type empirique de la série et `N` le nombre de mesures.
-
-```python
-u_x = uncertainty_type_A(values)
-```
-
-| Paramètre | Type | Description |
-|---|---|---|
-| `values` | `list[float]` | Liste des N valeurs mesurées (N ≥ 2) |
-
-La valeur utile pour la suite est `u_x["u"]`. La clé `nu` (= N−1) est retenue pour Welch-Satterthwaite si N < 30.
+The codebase is deliberately split into two layers that never mix: a calculation layer that knows nothing about LaTeX, and a formatting layer that runs no physics, only reusing results the calculation layer already produced. That separation means the output format can change without ever touching a formula, and a formula can change without ever touching a rounding rule.
 
 ---
 
-### Incertitude de type B — résolution d'un instrument
+## What I learned
 
-L'incertitude de type B s'applique quand on ne répète pas la mesure. On modélise l'ignorance sur la valeur vraie par une distribution uniforme de largeur δ (la résolution de l'instrument). L'incertitude-type associée est
+**On the physics side**, working through every uncertainty type forced me to actually understand *why* the GUM formulas look the way they do, not just apply them. Writing the Welch-Satterthwaite step, for instance, made the distinction between a type A and a type B source concrete: one is a statistical estimate with limited degrees of freedom, the other is (in general) a fixed, well-known bound. Implementing the linear regression covariance term was the clearest example: it's the kind of correlation that's easy to miss by hand, and building it into the engine means it's now impossible to forget.
 
-```
-u_B = (δ/2) / √3
-```
-
-```python
-u_x = uncertainty_type_B_from_resolution(resolution)
-```
-
-| Paramètre | Type | Description |
-|---|---|---|
-| `resolution` | `float` | Résolution δ de l'instrument (dernier digit ou graduation) |
+**On the engineering side**, this was my first real experience directing an AI collaborator on a project I designed myself rather than asking it to solve a problem from scratch. The useful split turned out to be: I own the domain logic and the architecture decisions (what a function should take as input, what "correct" means for a given GUM rule), and the AI translates that into code, catches edge cases I hadn't thought of, and keeps the implementation consistent across a large file. That only works if the underlying logic is mine — an AI can write correct code around a wrong idea just as easily as around a right one, so understanding the GUM well enough to check the output mattered more than the code itself.
 
 ---
 
-### Incertitude de type B — demi-largeur connue directement
+## How can it be improved
 
-Même principe que ci-dessus, mais quand la notice constructeur donne directement une tolérance ±a plutôt qu'une résolution δ.
+A few limitations are already documented directly in the code, and are the natural next steps:
 
-```python
-u_x = uncertainty_type_B_uniform(half_width)
-```
+- **Covariance is opt-in, not automatic.** Right now, the engine only accounts for correlation between two input quantities if it's explicitly passed in. The one common case that's handled automatically is a measurand built from a regression's slope and intercept. Any other source of correlation (say, two different measurands derived from the same regression) currently has to be handled manually by the caller.
+- **Propagation is strictly linear (first order).** The engine uses partial derivatives evaluated at the nominal value, which is what the GUM prescribes for well-behaved formulas. For strongly non-linear models, the GUM's own supplement recommends a Monte Carlo approach instead — that's not implemented yet.
+- **No weighted regression.** The linear fit currently assumes every data point carries the same uncertainty on y. Real experimental data doesn't always work that way, and a weighted least squares option would make the regression more broadly usable.
+- **Unit algebra is symbolic, not numeric.** When combining units (for example, deriving a slope's unit from `y_unit / x_unit`), the engine treats unit names as tokens rather than physical quantities. It won't automatically simplify `\kilo\gram` against `\gram` — mixing prefixes for the same physical unit currently produces an unsimplified (but not incorrect) result.
 
-| Paramètre | Type | Description |
-|---|---|---|
-| `half_width` | `float` | Demi-largeur a de l'intervalle (même unité que la grandeur) |
-
-> Note : `uncertainty_type_B_from_resolution(δ)` est un raccourci qui appelle `uncertainty_type_B_uniform(δ/2)` en interne.
-
----
-
-### Incertitude de type B — valeur fournie directement
-
-Quand l'incertitude-type est connue directement — par calibration, notice constructeur, ou propagée depuis un mesurande intermédiaire déjà calculé.
-
-```python
-u_x = uncertainty_type_B_relative(u_standard=valeur)
-```
-
-| Paramètre | Type | Description |
-|---|---|---|
-| `u_standard` | `float` | Incertitude-type u (pas l'incertitude élargie U = k·u) |
-| `relative_knowledge` | `float` ou `None` | Connaissance relative sur u — si fourni, estime les degrés de liberté par ν = 1/(2r²) |
-
-> En chaîne de mesurandes, toujours passer `res["uc"]`, jamais `res["U"]`. Passer U = k·u_c doublerait le facteur k — c'est une erreur GUM.
-
----
-
-### Constante exacte
-
-Pour une constante physique fondamentale (c, e, h…) ou toute grandeur dont l'incertitude est négligeable devant les autres sources.
-
-```python
-u_x = uncertainty_type_exact()
-```
-
-L'incertitude-type est nulle. La variable est exclue du budget d'incertitudes.
-
----
-
-## Étape 2 — Calculer le mesurande
-
-`full_gum_analysis` est la fonction principale. Elle prend la formule du mesurande, les valeurs nominales et les incertitudes déclarées à l'étape 1, et retourne le résultat complet : propagation GUM par dérivation symbolique, Welch-Satterthwaite si nécessaire, et arrondi cohérent.
-
-```python
-res = full_gum_analysis(
-    formula_str        = "...",
-    variable_names     = [...],
-    nominal_values     = {...},
-    uncertainty_inputs = {...},
-)
-```
-
-| Paramètre | Description |
-|---|---|
-| `formula_str` | Expression SymPy du mesurande — `*` pour la multiplication, `**` pour la puissance, `sqrt()`, `log()`, `sin()`, etc. |
-| `variable_names` | Liste ordonnée des noms de variables — doit être identique aux clés de `nominal_values` et `uncertainty_inputs`. Ne peut pas être vide. |
-| `nominal_values` | Dict `{nom: valeur nominale}` |
-| `uncertainty_inputs` | Dict `{nom: dict uncertainty_type_*}` |
-| `k_override` | Facteur k forcé (optionnel) — si absent, Welch-Satterthwaite détermine k automatiquement |
-
-Les clés utiles du résultat :
-
-| Clé | Description |
-|---|---|
-| `res["result_rounded"]` | Valeur nominale arrondie, cohérente avec U |
-| `res["U_rounded"]` | Incertitude élargie U = k·u_c, arrondie à 2 chiffres significatifs |
-| `res["uc"]` | Incertitude-type composée u_c (à passer en cas de chaîne — voir plus bas) |
-| `res["k"]` | Facteur d'élargissement retenu |
-| `res["nu_eff"]` | Degrés de liberté effectifs |
-| `res["budget"]` | Dict `{nom: %}` — contribution de chaque source à la variance composée |
-
----
-
-## Étape 3 — Générer le bilan LaTeX
-
-`generate_bilan` prend les mêmes entrées que `full_gum_analysis` et produit un bloc LaTeX complet : modèle de mesure, valeurs nominales, incertitudes source par source, coefficients de sensibilité, Welch-Satterthwaite si nécessaire, budget, et résultat encadré.
-
-```python
-bilan = generate_bilan(
-    measurand_name     = "...",
-    measurand_symbol   = "...",
-    formula_str        = "...",
-    variable_names     = [...],
-    variable_symbols   = {...},
-    variable_units     = {...},
-    nominal_values     = {...},
-    uncertainty_inputs = {...},
-    measurand_unit     = r"...",
-)
-```
-
-| Paramètre | Description |
-|---|---|
-| `measurand_name` | Nom en toutes lettres du mesurande — affiché entre parenthèses après le symbole dans la phrase d'introduction (ex : « Le mesurande $R$ (Résistance) est lié… »). Ignoré si identique à `measurand_symbol`. |
-| `measurand_symbol` | Symbole LaTeX du mesurande |
-| `formula_str` | Même expression que dans `full_gum_analysis` |
-| `variable_names` | Même liste que dans `full_gum_analysis` |
-| `variable_symbols` | Dict `{nom_python: symbole_LaTeX}` |
-| `variable_units` | Dict `{nom_python: unité_siunitx}` |
-| `nominal_values` | Même dict que dans `full_gum_analysis` |
-| `uncertainty_inputs` | Même dict que dans `full_gum_analysis` |
-| `measurand_unit` | Unité siunitx du mesurande |
-| `k_override` | Facteur k forcé (optionnel) |
-| `subsection` | `True` par défaut — génère un `\subsection{}` en tête du bilan |
-| `global_sig_figs` | Chiffres significatifs pour les valeurs intermédiaires (défaut : 3) |
-
-Les unités suivent la syntaxe du package siunitx : `r"\ohm"`, `r"\volt"`, `r"\ampere"`, `r"\second"`, `r"\meter"`, `r"\kilo\gram"`, `r"\meter\per\second"`, etc. Chaîne vide `""` si adimensionnel.
-
----
-
-## Étape 4 — Assembler l'annexe LaTeX
-
-`generate_annexe` prend la liste de tous les bilans dans l'ordre du compte rendu et produit la section LaTeX complète.
-
-```python
-print(generate_annexe([bilan_1, bilan_2, ...]))
-```
-
----
-
-## Cas particuliers
-
-### Régression linéaire seule
-
-Quand on veut caractériser une droite expérimentale sans en dériver un autre mesurande. Le modèle est y = θ₀ + θ₁·x. Le bilan inclut les estimateurs, leurs incertitudes-types dérivées de la variance résiduelle, et le coefficient r².
-
-L'unité de la pente est déduite automatiquement par algèbre de `y_unit / x_unit` — par exemple `\meter\per\second` divisé par `\second` donne `\meter\per\square\second`. On peut la surcharger explicitement via `slope_unit` si nécessaire.
-
-```python
-bilan_reg = generate_bilan_regression(
-    x_symbol         = "...",
-    y_symbol         = "...",
-    x_unit           = r"...",
-    y_unit           = r"...",
-    x_data           = [...],
-    y_data           = [...],
-    subsection_title = "...",
-    slope_unit       = r"...",    # optionnel — déduit de y_unit/x_unit si absent
-    intercept_unit   = r"...",    # optionnel — égal à y_unit si absent
-    slope_symbol     = r"\theta_1",
-    intercept_symbol = r"\theta_0",
-    global_sig_figs  = 3,         # optionnel — chiffres significatifs des valeurs intermédiaires
-)
-```
-
----
-
-### Régression + mesurande dérivé en un appel
-
-Quand le mesurande final dépend de la pente ou de l'ordonnée à l'origine d'une régression. Les noms `"theta1"` (pente) et `"theta0"` (ordonnée) dans `variable_names` sont reconnus automatiquement et alimentés par la régression — pas besoin de les fournir dans `nominal_values_helpers` ni `uncertainty_inputs_helpers`.
-
-```python
-latex = full_pipeline_regression_to_measurand(
-    x_data                     = [...],
-    y_data                     = [...],
-    x_symbol                   = "...",
-    y_symbol                   = "...",
-    x_unit                     = r"...",
-    y_unit                     = r"...",
-    formula_str                = "...",
-    variable_names             = [...],
-    variable_symbols           = {...},
-    variable_units             = {...},
-    nominal_values_helpers     = {...},
-    uncertainty_inputs_helpers = {...},
-    measurand_symbol           = "...",
-    measurand_name             = "...",   # optionnel — affiché entre parenthèses dans le bilan GUM
-    measurand_unit             = r"...",
-    slope_symbol               = r"\theta_1",
-    intercept_symbol           = r"\theta_0",
-    global_sig_figs            = 3,       # optionnel — cohérence chiffres sig. régression + GUM
-)
-print(latex)
-```
-
-La sortie contient le bilan de régression suivi du bilan GUM du mesurande, séparés par un `\clearpage`.
-
----
-
-### Chaîne de mesurandes
-
-Quand un mesurande Y dépend d'un mesurande X calculé précédemment, on passe `res_X["uc"]` via `uncertainty_type_B_relative`.
-
-```python
-res_X = full_gum_analysis(...)
-
-incertitudes_Y = {
-    "X":     uncertainty_type_B_relative(u_standard=res_X["uc"]),  # jamais res_X["U"]
-    "autre": uncertainty_type_B_from_resolution(...),
-}
-res_Y = full_gum_analysis(...)
-```
-
-> Ne jamais passer `res_X["U"]` — ce serait appliquer k deux fois.
+Beyond these, a natural extension would be a small test suite comparing the engine's output against hand-verified GUM examples from the course, to catch regressions automatically as the code evolves.
