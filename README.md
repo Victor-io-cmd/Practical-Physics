@@ -12,6 +12,8 @@ In experimental physics, every measurement comes with uncertainty, and every lab
 
 I built this for my own physics lab reports as an L3 Physics student at UPEC (Université Paris-Est Créteil), and I use it every time I need to write an uncertainty section.
 
+The generated LaTeX output is in French, since it's written directly into French-language lab reports.
+
 ---
 
 ## Author
@@ -26,10 +28,13 @@ Code generated with [Claude (Anthropic)](https://www.anthropic.com) from an arch
 
 ```
 gum-calc/
-├── GUM - Measurement Uncertainties.ipynb   # Notebook template
-├── gum_calc.py                             # Calculation engine and LaTeX export
+├── gum_calc.py               # Calculation engine and LaTeX export
+├── gum_notebook.skill        # Claude Skill: generates the notebook below automatically
+├── gum_uncertainties.ipynb   # Notebook template, one cell per measurand
 └── README.md
 ```
+
+`gum_notebook.skill` is a [Claude Skill](https://www.anthropic.com): a set of instructions that lets Claude generate `gum_uncertainties.ipynb` automatically for a new TP, wired to `gum_calc.py`, instead of duplicating and filling the template by hand for every report.
 
 ---
 
