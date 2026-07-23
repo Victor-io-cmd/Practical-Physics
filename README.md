@@ -6,7 +6,7 @@ Un moteur de calcul qui transforme des mesures brutes de TP en une analyse d'inc
 
 ## Le principe
 
-En physique expérimentale, chaque mesure s'accompagne d'une incertitude, et chaque compte rendu de TP nécessite une section rigoureuse expliquant d'où vient cette incertitude et comment elle se propage jusqu'au résultat final. Cette démarche suit une norme internationale, le **GUM** (Guide pour l'expression de l'incertitude de mesure), et la réaliser à la main pour chaque grandeur d'un compte rendu est lent, répétitif et source d'erreurs : une dérivée oubliée ou une règle d'arrondi mal appliquée suffit à produire un résultat faux.
+En physique expérimentale, chaque mesure s'accompagne d'une incertitude, et chaque compte rendu de TP nécessite une section rigoureuse expliquant d'où vient cette incertitude et comment elle se propage jusqu'au résultat final. Cette démarche suit une norme internationale, le **GUM** (Guide pour l'expression de l'incertitude de mesure), et la réaliser à la main pour chaque grandeur d'un compte rendu est lent, répétitif et source d'erreurs.
 
 `gum-calc` automatise l'ensemble de cette chaîne de traitement. On lui fournit une formule, des valeurs mesurées, et la façon dont chaque valeur a été obtenue, et il renvoie le résultat propagé accompagné d'une rédaction LaTeX prête à l'emploi : le modèle de mesure, les coefficients de sensibilité, le bilan d'incertitude, et le résultat final correctement arrondi.
 
@@ -111,3 +111,9 @@ J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cou
 - **Algèbre des unités symbolique, pas numérique.** Le moteur traite les noms d'unités comme des tokens : il ne simplifie pas automatiquement `\kilo\gram` face à `\gram`, mélanger les préfixes produit un résultat non simplifié mais pas incorrect.
 
 Une extension naturelle serait une suite de tests comparant la sortie du moteur à des exemples du GUM vérifiés à la main, pour détecter automatiquement les régressions au fil de l'évolution du code.
+
+---
+
+## Licence
+
+MIT — voir [LICENSE](LICENSE).
