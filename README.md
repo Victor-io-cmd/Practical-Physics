@@ -1,96 +1,113 @@
 # gum-calc
 
-A calculation engine that turns raw lab measurements into a fully formatted uncertainty analysis, ready to paste into a LaTeX report.
+Un moteur de calcul qui transforme des mesures brutes de TP en une analyse d'incertitude complète et formatée, prête à être collée dans un compte rendu LaTeX.
 
 ---
 
-## What this is
+## Le principe
 
-In experimental physics, every measurement comes with uncertainty, and every lab report needs a rigorous section explaining where that uncertainty comes from and how it propagates through the final result. This process follows an international standard called the **GUM** (Guide to the Expression of Uncertainty in Measurement), and doing it by hand for every quantity in a report is slow, repetitive, and error-prone: one skipped derivative or one misapplied rounding rule can silently produce a wrong result.
+En physique expérimentale, chaque mesure s'accompagne d'une incertitude, et chaque compte rendu de TP nécessite une section rigoureuse expliquant d'où vient cette incertitude et comment elle se propage jusqu'au résultat final. Cette démarche suit une norme internationale, le **GUM** (Guide pour l'expression de l'incertitude de mesure), et la réaliser à la main pour chaque grandeur d'un compte rendu est lent, répétitif et source d'erreurs : une dérivée oubliée ou une règle d'arrondi mal appliquée suffit à produire un résultat faux.
 
-`gum-calc` automates that entire pipeline. Give it a formula, some measured values, and how each value was obtained (repeated measurements, instrument resolution, manufacturer tolerance...), and it returns the propagated result together with a ready-to-use LaTeX writeup: the measurement model, the sensitivity coefficients, the uncertainty budget, and the final result correctly rounded.
+`gum-calc` automatise l'ensemble de cette chaîne de traitement. On lui fournit une formule, des valeurs mesurées, et la façon dont chaque valeur a été obtenue, et il renvoie le résultat propagé accompagné d'une rédaction LaTeX prête à l'emploi : le modèle de mesure, les coefficients de sensibilité, le bilan d'incertitude, et le résultat final correctement arrondi.
 
-I built this for my own physics lab reports as an L3 Physics student at UPEC (Université Paris-Est Créteil), and I use it every time I need to write an uncertainty section.
-
-The generated LaTeX output is in French, since it's written directly into French-language lab reports.
+Développé pour mes propres comptes rendus de TP en tant qu'étudiant en L3 Physique à l'UPEC (Université Paris-Est Créteil). La sortie LaTeX générée est en français, puisqu'elle est directement destinée à des comptes rendus rédigés en français.
 
 ---
 
-## Author
+## Installation
 
-**Victorio BONNEVILLE DIAZ** — L3 Physics student, UPEC (Université Paris-Est Créteil)
+```bash
+pip install sympy scipy
+```
 
-Code generated with [Claude (Anthropic)](https://www.anthropic.com) from an architecture and logic defined by the author, based on the GUM metrology coursework from L2 Physics at Université Paris-Est Créteil.
+Aucune autre dépendance. Fonctionne avec Python 3.10+ (utilisation de `list[float]` en annotation de type).
+
+## Usage rapide
+
+```python
+from gum_calc import (
+    uncertainty_type_A,
+    uncertainty_type_B_from_resolution,
+    full_gum_analysis,
+    generate_bilan,
+)
+
+# Tension : 5 mesures répétées → incertitude de type A
+u_U = uncertainty_type_A([5.02, 5.01, 5.03, 5.02, 5.00])
+
+# Courant : lu sur un ampèremètre de résolution 1 mA → type B
+u_I = uncertainty_type_B_from_resolution(resolution=0.001)
+
+res = full_gum_analysis(
+    formula_str="U / I",
+    variable_names=["U", "I"],
+    nominal_values={"U": u_U.mean, "I": 0.502},
+    uncertainty_inputs={"U": u_U, "I": u_I},
+)
+
+print(f"R = {res['result_rounded']} ± {res['U_rounded']}")
+# R = 10.0 ± 0.1
+
+# Génère directement le bloc LaTeX correspondant, prêt pour Overleaf
+bilan = generate_bilan(
+    measurand_name="Résistance", measurand_symbol="R",
+    formula_str="U / I", variable_names=["U", "I"],
+    variable_symbols={"U": "U", "I": "I"},
+    variable_units={"U": r"\volt", "I": r"\ampere"},
+    nominal_values={"U": u_U.mean, "I": 0.502},
+    uncertainty_inputs={"U": u_U, "I": u_I},
+    measurand_unit=r"\ohm",
+    _res_precomputed=res,
+)
+```
+
+Pour un TP complet avec plusieurs mesurandes, utiliser directement `gum_uncertainties.ipynb` : une cellule par grandeur, le tout assemblé en annexe par `generate_annexe()` en fin de notebook.
 
 ---
 
-## Project structure
+## Structure du projet
 
 ```
 gum-calc/
-├── gum_calc.py               # Calculation engine and LaTeX export
-├── gum_notebook.skill        # Claude Skill: generates the notebook below automatically
-├── gum_uncertainties.ipynb   # Notebook template, one cell per measurand
+├── gum_calc.py               # Moteur de calcul et export LaTeX
+├── gum_notebook.skill        # Skill Claude : génère automatiquement le notebook ci-dessous
+├── gum_uncertainties.ipynb   # Notebook modèle, une cellule par mesurande
 └── README.md
 ```
 
-`gum_notebook.skill` is a [Claude Skill](https://www.anthropic.com): a set of instructions that lets Claude generate `gum_uncertainties.ipynb` automatically for a new TP, wired to `gum_calc.py`, instead of duplicating and filling the template by hand for every report.
+`gum_notebook.skill` est un [Claude Skill](https://www.anthropic.com) : un ensemble d'instructions qui permet à Claude de générer automatiquement `gum_uncertainties.ipynb` pour un nouveau TP, câblé sur `gum_calc.py`, plutôt que de dupliquer et remplir le modèle à la main pour chaque compte rendu.
 
 ---
 
-## Technology
+## Fonctionnalités
 
-- **Python** for the calculation engine
-- **SymPy** for symbolic differentiation — the engine computes exact partial derivatives of any formula instead of relying on hardcoded propagation formulas
-- **SciPy** for the Student's t-distribution table, used in the Welch-Satterthwaite widening factor
-- **LaTeX / siunitx** as the output format, so the result can be pasted directly into a report compiled in Overleaf
-- **Jupyter Notebook** as the working environment, one cell per measured quantity
+**Typage des incertitudes.** Cinq fonctions couvrent les cas standards du GUM : mesures répétées (type A), résolution d'instrument ou tolérance connue (type B), une incertitude-type directement connue (par exemple propagée depuis un calcul précédent), et les constantes exactes.
 
----
+**Propagation symbolique.** La fonction centrale prend une formule en texte brut (comme `"U / I"`), la parse avec SymPy, et la différentie automatiquement par rapport à chaque variable. Plus besoin de dériver les formules de propagation à la main pour chaque nouveau mesurande.
 
-## Features
+**Facteur d'élargissement de Welch-Satterthwaite.** Lorsque des sources d'incertitude de fiabilités différentes sont combinées (une source de type B bien connue à côté d'une source de type A estimée sur peu de mesures), le moteur calcule le nombre de degrés de liberté effectif et lit le facteur d'élargissement `k` correct dans la table de Student, plutôt que de systématiquement supposer `k = 2`.
 
-**Uncertainty typing.** Five functions cover the standard GUM cases: repeated measurements (type A), instrument resolution or known tolerance (type B), a directly known standard uncertainty (for example, propagated from a previous calculation), and exact constants.
+**Régression linéaire avec covariance.** Un ajustement par moindres carrés ordinaires qui renvoie aussi la covariance entre la pente et l'ordonnée à l'origine, une grandeur presque toujours oubliée dans les calculs à la main mais qui compte dès qu'un résultat final dépend des deux.
 
-**Symbolic propagation.** The core function takes a formula as plain text (like `"U / I"`), parses it with SymPy, and differentiates it automatically with respect to every variable. This is what removes the need to derive propagation formulas by hand for every new measurand.
+**Arrondi correct, à chaque fois.** C'est toujours l'incertitude qui détermine le nombre de chiffres significatifs affichés pour le résultat, jamais l'inverse — l'une des erreurs les plus fréquentes en TP. Cette règle vit dans une seule fonction, pour ne jamais être appliquée de façon incohérente d'une section à l'autre.
 
-**Welch-Satterthwaite widening factor.** When uncertainty sources of different reliability are combined (a well-known type B source alongside a type A source estimated from only a few measurements), the engine computes the effective degrees of freedom and reads the correct widening factor `k` from the Student's t table, instead of always assuming `k = 2`.
-
-**Linear regression with covariance.** Ordinary least squares fitting that also returns the covariance between the slope and intercept, a quantity that is almost always forgotten in hand calculations but that matters whenever a final result depends on both.
-
-**Correct rounding, every time.** The uncertainty always decides the number of significant digits shown for the result, never the other way around — one of the most common mistakes in lab reports. This rule lives in a single function so it can never be applied inconsistently across a report.
-
-**LaTeX generation.** Full write-ups using the `siunitx` package: the measurement model, a description of each uncertainty source, the sensitivity coefficients, the Welch-Satterthwaite step when relevant, the uncertainty budget, and the boxed final result. Multiple write-ups can be assembled into a single appendix section.
-
-**Fails loudly, not silently.** Nearly every function checks its own inputs before calculating anything, and raises a precise error describing exactly what is wrong, rather than letting a bad value slip through and produce a wrong number in a report.
+**Génération LaTeX.** Rédactions complètes utilisant le package `siunitx` : le modèle de mesure, une description de chaque source d'incertitude, les coefficients de sensibilité, l'étape de Welch-Satterthwaite quand elle est pertinente, le bilan d'incertitude, et le résultat final encadré. Plusieurs rédactions peuvent être assemblées en une seule annexe.
 
 ---
 
-## The process
+## Architecture et démarche
 
-The project started from a real, recurring problem: rewriting the same uncertainty calculations and the same LaTeX blocks for every TP, with the same risk of making a rounding or propagation mistake each time.
+Le code est délibérément séparé en deux parties qui ne se mélangent jamais : une partie de calcul qui ne connaît rien au LaTeX, et une partie de formatage qui n'exécute aucune physique, se contentant de réutiliser des résultats que la couche de calcul a déjà produits.
 
-I designed the architecture and the calculation logic myself, based on the GUM metrology course from L2 Physics at UPEC: which uncertainty types exist, how propagation and widening are supposed to work, and what a correct uncertainty budget looks like. From there, I worked with Claude (Anthropic) to translate that logic into working Python — writing the SymPy-based propagation engine, the LaTeX formatting layer, and the regression pipeline, then testing edge cases against what the GUM actually prescribes.
-
-The codebase is deliberately split into two layers that never mix: a calculation layer that knows nothing about LaTeX, and a formatting layer that runs no physics, only reusing results the calculation layer already produced. That separation means the output format can change without ever touching a formula, and a formula can change without ever touching a rounding rule.
+J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cours de métrologie de L2 Physique à l'UPEC, puis j'ai travaillé avec [Claude (Anthropic)](https://www.anthropic.com) pour traduire cette logique en Python : le moteur de propagation SymPy, la mise en forme LaTeX, le pipeline de régression. Comprendre le GUM assez bien pour vérifier chaque résultat a compté davantage que l'écriture du code elle-même — une IA peut produire du code correct autour d'une idée fausse aussi facilement qu'autour d'une idée juste.
 
 ---
 
-## What I learned
+## Pistes d'amélioration
 
-**On the physics side**, working through every uncertainty type forced me to actually understand *why* the GUM formulas look the way they do, not just apply them. Writing the Welch-Satterthwaite step, for instance, made the distinction between a type A and a type B source concrete: one is a statistical estimate with limited degrees of freedom, the other is (in general) a fixed, well-known bound. Implementing the linear regression covariance term was the clearest example: it's the kind of correlation that's easy to miss by hand, and building it into the engine means it's now impossible to forget.
+- **Covariance optionnelle, pas automatique.** Le moteur ne prend en compte une corrélation entre deux grandeurs d'entrée que si elle lui est explicitement fournie. Le seul cas traité automatiquement est un mesurande construit à partir de la pente et de l'ordonnée à l'origine d'une régression.
+- **Propagation strictement linéaire (premier ordre).** Dérivées partielles évaluées à la valeur nominale, conforme au GUM pour des modèles bien comportés. Pour des modèles fortement non linéaires, le supplément du GUM recommande une approche Monte-Carlo, non implémentée.
+- **Pas de régression pondérée.** L'ajustement linéaire suppose que chaque point de mesure porte la même incertitude sur y.
+- **Algèbre des unités symbolique, pas numérique.** Le moteur traite les noms d'unités comme des tokens : il ne simplifie pas automatiquement `\kilo\gram` face à `\gram`, mélanger les préfixes produit un résultat non simplifié mais pas incorrect.
 
-**On the engineering side**, this was my first real experience directing an AI collaborator on a project I designed myself rather than asking it to solve a problem from scratch. The useful split turned out to be: I own the domain logic and the architecture decisions (what a function should take as input, what "correct" means for a given GUM rule), and the AI translates that into code, catches edge cases I hadn't thought of, and keeps the implementation consistent across a large file. That only works if the underlying logic is mine — an AI can write correct code around a wrong idea just as easily as around a right one, so understanding the GUM well enough to check the output mattered more than the code itself.
-
----
-
-## How can it be improved
-
-A few limitations are already documented directly in the code, and are the natural next steps:
-
-- **Covariance is opt-in, not automatic.** Right now, the engine only accounts for correlation between two input quantities if it's explicitly passed in. The one common case that's handled automatically is a measurand built from a regression's slope and intercept. Any other source of correlation (say, two different measurands derived from the same regression) currently has to be handled manually by the caller.
-- **Propagation is strictly linear (first order).** The engine uses partial derivatives evaluated at the nominal value, which is what the GUM prescribes for well-behaved formulas. For strongly non-linear models, the GUM's own supplement recommends a Monte Carlo approach instead — that's not implemented yet.
-- **No weighted regression.** The linear fit currently assumes every data point carries the same uncertainty on y. Real experimental data doesn't always work that way, and a weighted least squares option would make the regression more broadly usable.
-- **Unit algebra is symbolic, not numeric.** When combining units (for example, deriving a slope's unit from `y_unit / x_unit`), the engine treats unit names as tokens rather than physical quantities. It won't automatically simplify `\kilo\gram` against `\gram` — mixing prefixes for the same physical unit currently produces an unsimplified (but not incorrect) result.
-
-Beyond these, a natural extension would be a small test suite comparing the engine's output against hand-verified GUM examples from the course, to catch regressions automatically as the code evolves.
+Une extension naturelle serait une suite de tests comparant la sortie du moteur à des exemples du GUM vérifiés à la main, pour détecter automatiquement les régressions au fil de l'évolution du code.
