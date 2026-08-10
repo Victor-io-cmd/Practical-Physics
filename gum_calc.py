@@ -898,6 +898,27 @@ def _format_magnitude(value: float, sig: int) -> str:
     return f"{sign}{mantissa:.{sig-1}f}e{mag}"
 
 
+def format_magnitude(value: float, sig: int, mathtext: bool = False) -> str:
+    """
+    Version publique de `_format_magnitude`, utilisable hors contexte LaTeX
+    (ex : légende matplotlib d'app.py). Même règle de bascule que le reste
+    des bilans GUM : notation décimale pour -2 <= magnitude <= 3, notation
+    scientifique mantisse*10^exposant sinon (seuils `_SCI_NOTATION_MAG_MIN`
+    / `_SCI_NOTATION_MAG_MAX`).
+
+    `mathtext=True` réécrit la branche scientifique en syntaxe mathtext
+    matplotlib (`mantisse \\times 10^{exposant}`) au lieu de la notation
+    Python "e", pour un rendu correct dans une légende entourée de $...$ —
+    matplotlib ne comprend pas les macros siunitx `\\num{}` / `\\qty{}`
+    utilisées par `_num`/`_si` pour l'export LaTeX.
+    """
+    raw = _format_magnitude(value, sig)
+    if not mathtext or "e" not in raw:
+        return raw
+    mantissa_str, exp_str = raw.split("e")
+    return rf"{mantissa_str} \times 10^{{{int(exp_str)}}}"
+
+
 def _num(value: float, sig: int = 3) -> str:
     if value == 0:
         return r"\num{0}"
@@ -1075,8 +1096,8 @@ def _bilan_model_block(
     nom_val = res["result"]
     lines.append(
         r"\noindent avec " + defs_str
-        + rf", ce qui donne la valeur nominale "
-          rf"$\left.{measurand_symbol}\right|_{{\mathrm{{nom}}}} = "
+        + rf", ce qui donne "
+          rf"${measurand_symbol} = "
           rf"{_si(nom_val, measurand_unit, sig=global_sig_figs)}$."
     )
     lines.append(r"\newline")
@@ -1106,8 +1127,8 @@ def _bilan_source_blocks(
 
         if inp.type == "exact":
             lines.append(
-                rf"\noindent La grandeur ${sym}$ est une constante exacte déterminée par définition. "
-                rf"Son incertitude-type est nulle : $u({sym}) = 0$."
+                rf"\noindent La grandeur ${sym}$ est une constante exacte, "
+                rf"d'incertitude-type nulle : $u({sym}) = 0$."
             )
         elif inp.type == "A":
             N_mes    = inp.N
@@ -1331,13 +1352,13 @@ def _bilan_ws_block(
             # Cas dégénéré (nu_eff fini mais aucune composante ne satisfait
             # les critères d'affichage) : on retombe sur k standard.
             lines.append(
-                rf"\noindent Toutes les composantes configurées possèdent des degrés de liberté infinis, "
-                rf"on retient la standardisation classique $k = \num{{{k:.2f}}}$ (95\,\%)."
+                rf"\noindent Les degrés de liberté de chaque composante étant infinis, "
+                rf"on retient $k = \num{{{k:.2f}}}$ (intervalle de confiance à 95\,\%)."
             )
     else:
         lines.append(
-            rf"\noindent Toutes les composantes configurées possèdent des degrés de liberté infinis, "
-            rf"on retient la standardisation classique $k = \num{{{k:.2f}}}$ (95\,\%)."
+            rf"\noindent Les degrés de liberté de chaque composante étant infinis, "
+            rf"on retient $k = \num{{{k:.2f}}}$ (intervalle de confiance à 95\,\%)."
         )
     lines.append("")
     return lines
@@ -1377,7 +1398,7 @@ def _bilan_budget_result_block(
         if uncertainty_inputs[n].type != "exact"
     }
     if non_exact_budget:
-        lines.append(r"\noindent Le budget d'incertitudes :")
+        lines.append(rf"\noindent Contribution de chaque grandeur à $u_c({measurand_symbol})$ :")
         budget_terms = []
         for n in variable_names:
             if uncertainty_inputs[n].type == "exact":
@@ -1849,8 +1870,7 @@ def generate_bilan_regression(
     lines.append(r"\]")
     lines.append("")
     lines.append(
-        rf"Le coefficient de corrélation $r^2 = \num{{{reg['r2']:.4f}}}$ "
-        rf"confirme la qualité de l'ajustement."
+        rf"Le coefficient de corrélation vaut $r^2 = \num{{{reg['r2']:.4f}}}$."
     )
     lines.append(r"\newline")
     lines.append("")
