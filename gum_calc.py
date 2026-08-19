@@ -21,6 +21,17 @@ LIMITATIONS CONNUES
 - L'algèbre d'unités siunitx (`_parse_unit`/`_divide_units`) est purement
   symbolique sur le nom du token : aucune conversion numérique entre
   préfixes SI d'une même unité de base (ex : \\kilo\\gram vs \\gram).
+- `compatibility_test` (test de compatibilité théorie/mesure par variable
+  de Student réduite) suppose la valeur théorique de référence exacte :
+  toute incertitude propre à cette valeur théorique elle-même n'entre pas
+  dans le calcul du risque associé.
+- `nonlinear_regression` retourne la matrice de covariance asymptotique de
+  `scipy.optimize.curve_fit` (linéarisation locale du modèle au voisinage
+  de l'optimum) : comme `linear_regression`, elle n'est pas pondérée par
+  défaut (`sigma=None`) et ne couvre aucun cas fortement non identifiable
+  (paramètres corrélés à 100 %). `plot_nonlinear_regression` (show_band)
+  propage cette covariance par différences finies, pas par dérivation
+  symbolique — voir sa docstring.
 """
 
 import math
@@ -29,8 +40,10 @@ import warnings
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from types import MappingProxyType
+import numpy as np
 import sympy as sp
 from scipy import stats as scipy_stats
+from scipy.optimize import curve_fit
 
 
 # ============================================================
@@ -412,6 +425,36 @@ def calculate_uncertainty(
     }
 
 
+def _k_factor(nu_eff: float) -> float:
+    """
+    Facteur d'élargissement k (intervalle de confiance à 95 %, test
+    bilatéral) à partir des degrés de liberté effectifs nu_eff.
+
+    k = 2.0 si nu_eff est infini (repli loi normale) ; sinon quantile
+    0.975 de la loi de Student à nu_eff degrés de liberté, arrondi à
+    0.001 par _round_half_up (et non round(), qui applique l'arrondi
+    bancaire Python — cohérence avec le reste du module).
+
+    Factorisée hors de `welch_satterthwaite` pour être réutilisable par
+    `generate_bilan_compatibilite`, qui a besoin du même k pour afficher
+    U = k·u_c dans sa phrase d'introduction sans dupliquer la logique ni
+    risquer une divergence future entre les deux calculs.
+    """
+    if not math.isfinite(nu_eff):
+        return 2.0
+    k_raw = scipy_stats.t.ppf(0.975, df=nu_eff)
+    if not math.isfinite(k_raw):
+        warnings.warn(
+            f"_k_factor : facteur k non fini (nu_eff={nu_eff:.3g}). "
+            "Les degrés de liberté effectifs sont anormalement proches de 0 — "
+            "on retombe sur k = 2.0 par sécurité. Vérifiez les nu fournis.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return 2.0
+    return _round_half_up(k_raw, 0.001)
+
+
 def welch_satterthwaite(
     variable_names: list[str],
     sensitivities: dict[str, float],
@@ -442,26 +485,10 @@ def welch_satterthwaite(
 
     if not has_finite_nu or denominator == 0.0:
         nu_eff = float("inf")
-        k      = 2.0
     else:
         nu_eff = (uc_squared ** 2) / denominator
-        k_raw  = scipy_stats.t.ppf(0.975, df=nu_eff)
-        if not math.isfinite(k_raw):
-            warnings.warn(
-                f"welch_satterthwaite : facteur k non fini (nu_eff={nu_eff:.3g}). "
-                "Les degrés de liberté effectifs sont anormalement proches de 0 — "
-                "on retombe sur k = 2.0 par sécurité. Vérifiez les nu fournis.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            k = 2.0
-        else:
-            # _round_half_up (et non round(), qui applique l'arrondi bancaire
-            # Python) pour rester cohérent avec la convention utilisée
-            # partout ailleurs dans le module.
-            k = _round_half_up(k_raw, 0.001)
 
-    return {"nu_eff": nu_eff, "k": k}
+    return {"nu_eff": nu_eff, "k": _k_factor(nu_eff)}
 
 
 def expanded_uncertainty(uc: float, k: float = 2.0) -> float:
@@ -600,6 +627,174 @@ def linear_regression(x_data: list[float], y_data: list[float]) -> dict:
         "y_pred": y_pred,
         "residuals": residuals,
         "nu": N - 2,
+    }
+
+
+def nonlinear_regression(
+    x_data: list[float],
+    y_data: list[float],
+    model_func,
+    p0: list[float],
+    param_names: list[str],
+    sigma: list[float] = None,
+) -> dict:
+    """
+    Régression non linéaire par moindres carrés (scipy.optimize.curve_fit).
+
+    Modèle : y = model_func(x, *params), avec `model_func` un callable
+    Python pur de signature scipy-compatible — ex, pour une décharge RC :
+        model_func = lambda t, V0, tau: V0 * np.exp(-t / tau)
+        param_names = ["V0", "tau"]
+
+    Analogue non affine de `linear_regression` : mêmes familles de clés en
+    retour (params/u_params plutôt que theta0/theta1, nu = N - p plutôt
+    que N - 2), pour rester lisible par comparaison directe avec le cas
+    affine. Aucune des deux fonctions n'appelle l'autre : `linear_regression`
+    reste le cas affine dédié, validé sur des CR réels de L2, et n'est pas
+    modifiée par l'ajout de celle-ci.
+
+    Paramètres
+    ----------
+    x_data, y_data : listes de même longueur (N > nombre de paramètres,
+                     pour que nu = N - p soit strictement positif).
+    model_func     : callable(x, *params) -> y, signature scipy-compatible.
+                     Reçoit x_data sous forme de tableau numpy (pas une
+                     liste Python) à l'intérieur de curve_fit : utiliser
+                     des opérations numpy (np.exp, np.sin, np.sqrt...),
+                     jamais le module math, sous peine de TypeError.
+    p0             : estimation initiale des paramètres, même ordre que
+                     param_names. Un p0 trop éloigné de la solution est la
+                     cause la plus fréquente de non-convergence.
+    param_names    : noms des paramètres, même ordre que p0 et que la
+                     signature de model_func après x.
+    sigma          : incertitude-type sur y, point par point (liste de
+                     longueur N) — None par défaut (régression non
+                     pondérée). Si fourni, curve_fit est appelé avec
+                     absolute_sigma=True : la covariance retournée reflète
+                     alors directement les incertitudes fournies
+                     (propagation Type B classique, GUM §5.1.2). Si None,
+                     absolute_sigma=False : la covariance est mise à
+                     l'échelle par le chi² réduit des résidus — incertitude
+                     estimée empiriquement à partir de la dispersion des
+                     données elles-mêmes, analogue à s²_res dans
+                     `linear_regression`.
+
+    Retourne un dict avec :
+      params      — dict {nom: valeur estimée}
+      u_params    — dict {nom: incertitude-type}, sqrt(diag(pcov))
+      cov         — matrice de covariance complète (pcov de curve_fit),
+                    dans l'ordre de param_names — à fournir à
+                    `calculate_uncertainty`/`generate_bilan` (paramètre
+                    `covariances`) pour tout mesurande combinant deux
+                    paramètres corrélés (fréquent entre amplitude et
+                    taux de décroissance d'une exponentielle)
+      nu          — degrés de liberté, N - p (p = nombre de paramètres)
+      residuals, y_pred, r2
+      model_func, param_names — conservés pour que plot_courbes puisse
+                    retracer la courbe sans recalculer l'ajustement
+      N           — nombre de points de mesure
+    """
+    N = len(x_data)
+    if N != len(y_data):
+        raise ValueError("nonlinear_regression : x_data et y_data doivent avoir la même longueur.")
+    if len(p0) != len(param_names):
+        raise ValueError(
+            f"nonlinear_regression : p0 (longueur {len(p0)}) et param_names "
+            f"(longueur {len(param_names)}) doivent avoir la même longueur."
+        )
+    p = len(param_names)
+    if N <= p:
+        raise ValueError(
+            f"nonlinear_regression : N = {N} points pour p = {p} paramètres — "
+            "il faut strictement plus de points de mesure que de paramètres "
+            "libres (nu = N - p doit être positif)."
+        )
+
+    for label, data in (("x_data", x_data), ("y_data", y_data)):
+        bad = [v for v in data if not math.isfinite(v)]
+        if bad:
+            raise ValueError(
+                f"nonlinear_regression : {label} contient des valeurs non "
+                f"finies ({bad[:3]}). Nettoyez les données avant l'ajustement."
+            )
+
+    if sigma is not None:
+        if len(sigma) != N:
+            raise ValueError(
+                f"nonlinear_regression : sigma (longueur {len(sigma)}) doit "
+                f"avoir la même longueur que x_data/y_data (N = {N})."
+            )
+        bad_sigma = [v for v in sigma if not math.isfinite(v) or v <= 0]
+        if bad_sigma:
+            raise ValueError(
+                "nonlinear_regression : sigma doit être strictement positif "
+                f"et fini pour chaque point ({bad_sigma[:3]} invalide(s))."
+            )
+
+    x_arr = np.asarray(x_data, dtype=float)
+    y_arr = np.asarray(y_data, dtype=float)
+
+    try:
+        popt, pcov = curve_fit(
+            model_func, x_arr, y_arr, p0=p0, sigma=sigma,
+            absolute_sigma=(sigma is not None), maxfev=10000,
+        )
+    except RuntimeError as exc:
+        raise ValueError(
+            "nonlinear_regression : l'ajustement n'a pas convergé "
+            "(scipy.optimize.curve_fit). Cause probable : p0 trop éloigné "
+            "de la solution, ou modèle mal posé pour ces données. Message "
+            f"scipy d'origine : {exc}."
+        ) from exc
+    except TypeError as exc:
+        raise ValueError(
+            "nonlinear_regression : signature de model_func incompatible "
+            f"avec param_names (p = {p}). Vérifiez que model_func(x, "
+            f"*params) accepte exactement {p} paramètre(s) après x. "
+            f"Message d'origine : {exc}."
+        ) from exc
+
+    if not np.all(np.isfinite(popt)) or not np.all(np.isfinite(pcov)):
+        raise ValueError(
+            "nonlinear_regression : résultat non fini en sortie de "
+            "curve_fit (paramètres ou covariance). Modèle probablement "
+            "non identifiable avec ces données (paramètres corrélés à "
+            "100 %, ou p0 sur un point singulier du modèle)."
+        )
+
+    # Clamp cancellation numérique (O(1e-16)) sur la diagonale, même garde-
+    # fou que s2_res dans linear_regression : math.sqrt lèverait sinon.
+    u_params_arr = np.sqrt(np.clip(np.diag(pcov), 0.0, None))
+
+    y_pred    = np.asarray(model_func(x_arr, *popt), dtype=float)
+    residuals = y_arr - y_pred
+    ss_res    = float(np.sum(residuals ** 2))
+    y_mean    = float(np.mean(y_arr))
+    syy       = float(np.sum((y_arr - y_mean) ** 2))
+    if syy > 0:
+        r2 = 1.0 - ss_res / syy
+    else:
+        # Toutes les yi identiques : cf. avertissement identique dans
+        # linear_regression, même justification.
+        warnings.warn(
+            "nonlinear_regression : toutes les valeurs yi sont identiques "
+            "(syy=0) — r² n'a pas de sens prédictif, fixé à NaN.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        r2 = float("nan")
+
+    return {
+        "params":      dict(zip(param_names, (float(v) for v in popt))),
+        "u_params":    dict(zip(param_names, (float(v) for v in u_params_arr))),
+        "cov":         pcov,
+        "nu":          N - p,
+        "N":           N,
+        "residuals":   residuals.tolist(),
+        "y_pred":      y_pred.tolist(),
+        "r2":          r2,
+        "model_func":  model_func,
+        "param_names": list(param_names),
     }
 
 
@@ -754,9 +949,40 @@ def full_gum_analysis(
 # utilisent. ---
 _SCI_NOTATION_MAG_MIN = -2   # en dessous : notation scientifique
 _SCI_NOTATION_MAG_MAX = 3    # au-dessus  : notation scientifique
-_INLINE_MAX_CHARS     = 70   # au-delà : \boxed{...} bascule en \begin{array}
+_INLINE_MAX_CHARS     = 70   # au-delà (en largeur *visuelle*, cf. _visual_length) : \boxed{...} bascule en \begin{array}
 _ALIGN_MAX_CHARS      = 90   # au-delà : ligne unique \[ \] bascule en align*
 _ALIGN_MAX_TERMS      = 3    # à partir de : bascule en align* (même sans dépasser la longueur)
+
+_LATEX_MACRO_OPTIONS_RE = re.compile(r"\[[^\]]*\]")
+_LATEX_MACRO_NAME_RE    = re.compile(r"\\(left|right|[a-zA-Z]+)")
+
+
+def _visual_length(latex_str: str) -> int:
+    """
+    Estime la largeur *visuelle* (nombre de caractères effectivement
+    imprimés à la compilation) d'une expression LaTeX en display math.
+
+    Un simple `len()` sur la chaîne source surestime massivement la
+    largeur réelle dès que des macros verbeuses interviennent : par
+    exemple `\\qty[separate-uncertainty=true]{3.01 +- 0.36 e8}
+    {\\meter\\per\\second}` pèse 71 caractères en source mais n'imprime
+    que "3.01 ± 0.36 × 10⁸ m/s" (une vingtaine de caractères). Décider de
+    la bascule \\boxed{} inline / array sur la longueur de la source
+    plutôt que sur celle-ci fait donc basculer en array des résultats qui
+    tiennent en réalité très largement sur une seule ligne (cas déjà
+    observé : un résultat à une seule grandeur, ou une régression à deux
+    termes, qui n'a aucune raison de se couper).
+
+    On retire successivement : les options de macro entre crochets
+    (`[separate-uncertainty=true]`), les commandes elles-mêmes (`\\qty`,
+    `\\num`, `\\left`, `\\right`, `\\volt`...), puis les accolades de
+    regroupement — ce qui ne laisse que les chiffres, signes et unités
+    réellement imprimés à l'écran.
+    """
+    s = _LATEX_MACRO_OPTIONS_RE.sub("", latex_str)
+    s = _LATEX_MACRO_NAME_RE.sub("", s)
+    s = s.replace("{", "").replace("}", "")
+    return len(s)
 
 _LATEX_SPECIAL_CHARS = {
     "\\": r"\textbackslash{}",
@@ -1243,7 +1469,7 @@ def _bilan_propagation_block(
             # traitement que les grandeurs "exact").
             continue
         inner_terms.append(
-            rf"({_sci(ci, sig=global_sig_figs)})^2 \, ({_num(ui, sig=global_sig_figs)})^2"
+            rf"({_sci(ci, sig=global_sig_figs)})^2 \cdot ({_num(ui, sig=global_sig_figs)})^2"
         )
 
     if not inner_terms:
@@ -1405,7 +1631,7 @@ def _bilan_budget_result_block(
                 continue
             pct = res["budget"][n]
             budget_terms.append(
-                rf"\frac{{c_{{{sym_map[n]}}}^2\,u^2({sym_map[n]})}}{{u_c^2({measurand_symbol})}} = \num{{{pct:.1f}}}\,\%"
+                rf"\frac{{c_{{{sym_map[n]}}}^2 \cdot u^2({sym_map[n]})}}{{u_c^2({measurand_symbol})}} = \num{{{pct:.1f}}}\,\%"
             )
         budget_line = r"\qquad ".join(budget_terms)
         if len(budget_terms) > _ALIGN_MAX_TERMS or len(budget_line) > _ALIGN_MAX_CHARS:
@@ -1435,7 +1661,7 @@ def _bilan_budget_result_block(
     box_inline = rf"{measurand_symbol} = {final_expr}"
 
     lines.append(r"\[")
-    if len(box_inline) > _INLINE_MAX_CHARS:
+    if _visual_length(box_inline) > _INLINE_MAX_CHARS:
         lines.append(r"    \boxed{")
         lines.append(r"    \begin{array}{c}")
         lines.append(rf"    {measurand_symbol} \\[4pt]")
@@ -1526,6 +1752,316 @@ def generate_bilan(
 
 
 # ============================================================
+# PARTIE 2c — TEST DE COMPATIBILITÉ THÉORIE / MESURE
+# ============================================================
+#
+# Répond à une question différente de generate_bilan : non pas "quelle
+# est l'incertitude de ce mesurande ?" mais "ce résultat est-il
+# compatible avec une valeur théorique de référence ?". Méthode issue
+# du cours de métrologie L2/L3 (UPEC, N. Bochud — "Déclaration de
+# conformité et incertitude de mesure") : comparaison par variable de
+# Student réduite t(nu_eff) = |y - y_theo| / u_c(y), lue via la loi de
+# Student (ou normale si nu_eff est infini) pour estimer un risque
+# associé au rejet de la compatibilité.
+#
+# Callable sur un mesurande direct (uc=res["uc"], nu_eff=res["nu_eff"])
+# ou sur un paramètre de régression (uc=reg["u_theta0"/"u_theta1"],
+# nu_eff=reg["nu"]) : les deux usages se contentent de transmettre uc et
+# nu_eff déjà produits ailleurs dans le module, sans recalcul.
+# ============================================================
+
+# Risque bilatéral (%) en dessous duquel la mesure est déclarée
+# incompatible avec la valeur théorique. Seuil cohérent avec le facteur
+# k=2 (~95% de confiance) retenu par défaut ailleurs dans le module
+# (cf. welch_satterthwaite, scipy_stats.t.ppf(0.975, ...)).
+_COMPATIBILITY_RISK_THRESHOLD = 5.0
+
+
+def compatibility_test(
+    y_mesure: float,
+    y_theorique: float,
+    uc: float,
+    nu_eff: float,
+) -> dict:
+    """
+    Test de compatibilité théorie/mesure par variable de Student réduite.
+
+    t(nu_eff) = |y_mesure - y_theorique| / u_c
+
+    Le risque associé (test bilatéral) est la probabilité, sous
+    l'hypothèse que y_mesure et y_theorique sont compatibles, d'observer
+    un écart au moins aussi grand que celui mesuré. Il est lu par le
+    complément à 2 queues de la loi de Student à nu_eff degrés de
+    liberté (scipy.stats.t.sf), ou de la loi normale si nu_eff est
+    infini — cas limite de la loi de Student, cohérent avec le repli
+    k=2.00 utilisé par welch_satterthwaite dans la même situation.
+
+    Paramètres
+    ----------
+    y_mesure    : valeur mesurée — mesurande direct (res["result"]) ou
+                  paramètre de régression (reg["theta0"]/reg["theta1"]).
+    y_theorique : valeur théorique de référence à laquelle comparer
+                  y_mesure. Supposée exacte : toute incertitude propre à
+                  y_theorique elle-même n'est pas prise en compte ici
+                  (voir LIMITATIONS CONNUES en tête de module).
+    uc          : incertitude-type composée de y_mesure — res["uc"]
+                  (mesurande direct) ou reg["u_theta0"]/reg["u_theta1"]
+                  (paramètre de régression).
+    nu_eff      : degrés de liberté effectifs associés à uc —
+                  res["nu_eff"] (mesurande direct, Welch-Satterthwaite)
+                  ou reg["nu"] (régression, = N - 2).
+
+    Retourne un dict avec :
+      s          — écart relatif |y_mesure - y_theorique| / |y_theorique|,
+                   None si y_theorique = 0 (écart relatif non défini).
+      ecart_abs  — écart absolu |y_mesure - y_theorique|.
+      t_stat     — variable de Student réduite t(nu_eff). Vaut float('inf')
+                   si uc = 0 et ecart_abs > 0 (incertitude nulle mais
+                   désaccord non nul), 0.0 si uc = 0 et ecart_abs = 0.
+      nu_eff     — repris tel quel, pour affichage dans le paragraphe LaTeX.
+      risk       — risque associé en %, borné à [0, 100].
+      compatible — bool, True si risk >= _COMPATIBILITY_RISK_THRESHOLD.
+    """
+    if uc < 0:
+        raise ValueError(f"compatibility_test : uc doit être positif ou nul : {uc}")
+    if not math.isfinite(y_mesure) or not math.isfinite(y_theorique):
+        raise ValueError(
+            "compatibility_test : y_mesure et y_theorique doivent être "
+            f"finis (reçu y_mesure={y_mesure}, y_theorique={y_theorique})."
+        )
+
+    ecart_abs = abs(y_mesure - y_theorique)
+    s = (ecart_abs / abs(y_theorique)) if y_theorique != 0 else None
+
+    if uc == 0:
+        t_stat = float("inf") if ecart_abs > 0 else 0.0
+    else:
+        t_stat = ecart_abs / uc
+
+    if t_stat == 0.0:
+        risk = 100.0
+    elif not math.isfinite(t_stat):
+        risk = 0.0
+    elif math.isfinite(nu_eff):
+        risk = 2.0 * scipy_stats.t.sf(t_stat, df=nu_eff) * 100.0
+    else:
+        risk = 2.0 * scipy_stats.norm.sf(t_stat) * 100.0
+
+    return {
+        "s":          s,
+        "ecart_abs":  ecart_abs,
+        "t_stat":     t_stat,
+        "nu_eff":     nu_eff,
+        "risk":       risk,
+        "compatible": risk >= _COMPATIBILITY_RISK_THRESHOLD,
+    }
+
+
+def _subscripted(symbol: str, sub_text: str) -> str:
+    """
+    Construit "symbol" indicé par sub_text (ex : h_exp, V_théo,
+    (\\theta_1)_théo).
+
+    Le symbole n'est parenthésé que s'il porte déjà lui-même un indice
+    (présence d'un "_" dans `symbol`) : un double subscript LaTeX
+    (\\theta_1_{...}) ne compile pas et doit donc être parenthésé, alors
+    qu'un symbole simple (h, V) s'indice directement, sans parenthèses
+    superflues.
+
+    `sub_text` est rendu en `\\text{}` dès qu'il contient un caractère non
+    ASCII (ex : "théo"), et en `\\mathrm{}` sinon (ex : "exp"). Les
+    accents composés UTF-8 ne sont pas garantis de s'afficher correctement
+    en mode mathématique (`\\mathrm`) selon la police/l'encodage du
+    document hôte — c'est la cause la plus probable d'un "théo" qui
+    s'affiche tronqué en "tho" à la compilation. `\\text{}` bascule en
+    mode texte, où les accents du reste du document sont par construction
+    déjà correctement pris en charge.
+    """
+    core = rf"\text{{{sub_text}}}" if not sub_text.isascii() else rf"\mathrm{{{sub_text}}}"
+    if "_" in symbol:
+        return rf"\left({symbol}\right)_{{{core}}}"
+    return rf"{symbol}_{{{core}}}"
+
+
+def _compat_verdict_phrase(measurand_symbol: str, compatible: bool) -> str:
+    """
+    Phrase de conclusion du test de compatibilité.
+
+    Volontairement dépourvue du terme "risque" : ce mot de jargon
+    statistique n'explicite ni d'où vient le pourcentage qui le précède,
+    ni ce qu'il faut en conclure. La conclusion est énoncée directement en
+    langage courant — la valeur mesurée est "compatible" avec la théorie,
+    ou se situe "hors de la plage de compatibilité" — sans terme
+    intermédiaire à interpréter.
+    """
+    seuil = rf"\num{{{_COMPATIBILITY_RISK_THRESHOLD:.0f}}}\,\%"
+    if compatible:
+        return (
+            rf"Cette probabilité dépasse le seuil de {seuil} : "
+            rf"${measurand_symbol}$ est donc compatible avec la valeur théorique"
+        )
+    return (
+        rf"Cette probabilité est inférieure au seuil de {seuil} : "
+        rf"${measurand_symbol}$ se situe hors de la plage de compatibilité, "
+        rf"ce qui indique un écart significatif avec la valeur théorique"
+    )
+
+
+def generate_bilan_compatibilite(
+    measurand_symbol: str,
+    y_mesure: float,
+    uc: float,
+    nu_eff: float,
+    y_theorique: float,
+    measurand_unit: str = "",
+    measurand_name: str = "",
+    subsection: bool = False,
+    subsection_title: str = "Confrontation à la valeur théorique",
+    global_sig_figs: int = 3,
+    k: float = None,
+    U: float = None,
+    annexe_ref: bool = True,
+    _compat_precomputed: dict = None,
+) -> str:
+    """
+    Génère le paragraphe LaTeX de confrontation théorie/mesure pour un
+    résultat déjà propagé — mesurande direct ou paramètre de régression.
+
+    `y_theorique` est le paramètre qui distingue structurellement cet
+    usage de `generate_bilan` (qui n'en a pas besoin) : sa présence
+    détermine que ce résultat doit être confronté à une valeur théorique
+    plutôt que simplement documenté. Appel prévu directement dans la
+    cellule de la courbe concernée (juste après plot_regression /
+    plot_residuals), jamais dans le bloc annexe de fin de notebook — voir
+    generate_annexe, qui reste réservé aux bilans `generate_bilan`.
+
+    Callable sur :
+    - un mesurande direct : uc=res["uc"], nu_eff=res["nu_eff"], et
+      idéalement k=res["k"], U=res["U"] (sortie de full_gum_analysis) ;
+    - un paramètre de régression : uc=reg["u_theta0"] ou reg["u_theta1"],
+      nu_eff=reg["nu"] (sortie de linear_regression, qui ne fournit pas
+      de k/U — recalculés ici à partir de nu_eff, voir plus bas).
+
+    `k` / `U` : facteur d'élargissement et incertitude élargie déjà
+    disponibles côté appelant (cas d'un mesurande direct). S'ils ne sont
+    pas fournis (cas d'un paramètre de régression, qui n'en calcule pas
+    nativement), ils sont recalculés ici — k via `_k_factor(nu_eff)`
+    (même formule que `welch_satterthwaite`), puis U = k·uc — pour rester
+    exact même sans passer par `full_gum_analysis`.
+
+    Contenu généré, dans cet ordre :
+    - une phrase d'introduction rappelant la valeur mesurée avec son
+      incertitude élargie et le facteur k utilisé, en renvoyant à
+      l'annexe pour la justification détaillée de cette incertitude
+      (contrôlable via `annexe_ref`) ;
+    - écart relatif s ;
+    - variable de Student réduite t(nu_eff), avec le degré de liberté
+      effectif utilisé ;
+    - probabilité de compatibilité en % (test bilatéral) et conclusion
+      explicite de compatibilité ou de rejet — voir `compatibility_test`
+      pour le détail du calcul.
+
+    `_compat_precomputed` accepte le dict déjà renvoyé par un appel
+    antérieur à `compatibility_test` (même convention que
+    `_res_precomputed` dans generate_bilan).
+    """
+    compat = _compat_precomputed if _compat_precomputed is not None else compatibility_test(
+        y_mesure, y_theorique, uc, nu_eff,
+    )
+    lines = []
+
+    if subsection:
+        lines.append(rf"\subsection{{{_escape_latex(subsection_title)}}}")
+        lines.append("")
+
+    theo_symbol = _subscripted(measurand_symbol, "théo")
+    exp_symbol  = _subscripted(measurand_symbol, "exp")
+
+    if math.isfinite(nu_eff):
+        nu_str = rf"\nu_{{\mathrm{{eff}}}} = {nu_eff:.0f}"
+    else:
+        nu_str = r"\nu_{\mathrm{eff}} \to \infty \ (\text{loi normale})"
+
+    # Phrase d'introduction : rappelle explicitement la valeur mesurée avec
+    # son incertitude élargie (jusqu'ici absente de ce bilan, qui ne
+    # travaillait qu'avec la valeur ponctuelle y_mesure), et renvoie à
+    # l'annexe pour la justification détaillée — cette incertitude U/uc
+    # étant, par construction de l'appel (cf. docstring), la même que
+    # celle déjà calculée et documentée par generate_bilan. Le facteur k
+    # n'est plus affiché dans le texte (il reste calculé ci-dessous pour
+    # obtenir U_val) : sa valeur numérique est déjà portée par la
+    # notation \qty[separate-uncertainty=true] elle-même.
+    k_val = k if k is not None else _k_factor(nu_eff)
+    U_val = U if U is not None else k_val * uc
+    fmt = format_result(y_mesure, U_val, sig_figs_exact=global_sig_figs)
+    exp_expr = _format_result_uncertainty(
+        fmt["result"], fmt["U"], measurand_unit, sig_figs_exact=global_sig_figs
+    )
+    annexe_clause = (
+        ", la justification de cette incertitude est détaillée en annexe."
+        if annexe_ref else "."
+    )
+    # Un seul paragraphe (pas de ligne blanche) : la phrase d'introduction
+    # et la comparaison à la valeur théorique s'enchaînent directement.
+    lines.append(
+        rf"\noindent La mesure conduit à ${exp_symbol} = {exp_expr}${annexe_clause} "
+        rf"On compare la valeur de ${measurand_symbol}$ trouvée, "
+        rf"${measurand_symbol} = {_si(y_mesure, measurand_unit, sig=global_sig_figs)}$, "
+        rf"à la valeur théorique ${theo_symbol} = "
+        rf"{_si(y_theorique, measurand_unit, sig=global_sig_figs)}$, telle que l'écart relatif vaut :"
+    )
+    lines.append(r"\newline")
+    lines.append(r"\[")
+    if compat["s"] is None:
+        lines.append(
+            rf"    s = \frac{{|{measurand_symbol} - {theo_symbol}|}}{{{theo_symbol}}}"
+            rf" \quad \text{{(non défini, valeur théorique nulle)}}"
+        )
+    else:
+        lines.append(
+            rf"    s = \frac{{|{measurand_symbol} - {theo_symbol}|}}{{{theo_symbol}}}"
+            rf" = \num{{{compat['s'] * 100:.1f}}}\,\%"
+        )
+    lines.append(r"\]")
+    lines.append(r"\newline")
+
+    lines.append(rf"\noindent On calcule ensuite la variable de Student réduite, pour ${nu_str}$ :")
+    lines.append(r"\newline")
+    lines.append(r"\[")
+    if math.isfinite(compat["t_stat"]):
+        t_str = _num(compat["t_stat"], sig=global_sig_figs)
+    else:
+        t_str = r"\to \infty"
+    lines.append(
+        rf"    t = \frac{{|{measurand_symbol} - {theo_symbol}|}}"
+        rf"{{u_c({measurand_symbol})}} = {t_str}"
+    )
+    lines.append(r"\]")
+    lines.append(r"\newline")
+
+    # Clause finale reliant la conclusion du test de Student à l'écart
+    # relatif s calculé plus haut, pour expliciter que les deux approches
+    # (test statistique et simple comparaison en %) mènent à la même
+    # lecture. Omise si s n'est pas défini (valeur théorique nulle).
+    if compat["s"] is not None:
+        coherence_clause = (
+            rf", ce qui est cohérent avec l'écart relatif de "
+            rf"\num{{{compat['s'] * 100:.1f}}}\,\% obtenu précédemment."
+        )
+    else:
+        coherence_clause = "."
+
+    lines.append(
+        rf"\noindent Par lecture de la loi de Student, cette valeur de $t$ correspond "
+        rf"à une probabilité de compatibilité de \num{{{compat['risk']:.1f}}}\,\%. "
+        rf"{_compat_verdict_phrase(measurand_symbol, compat['compatible'])}"
+        rf"{coherence_clause}"
+    )
+
+    return "\n".join(lines)
+
+
+# ============================================================
 # PARTIE 3 — PIPELINE INTÉGRÉ (régression → mesurande)
 # ============================================================
 
@@ -1552,6 +2088,7 @@ def full_pipeline_regression_to_measurand(
     global_sig_figs: int = 3,
     couple_theta0: bool = False,
     couple_theta1: bool = False,
+    functional_notation: bool = False,
 ) -> str:
     """
     Génère d'un seul appel le LaTeX complet : régression + propagation GUM.
@@ -1611,6 +2148,7 @@ def full_pipeline_regression_to_measurand(
         slope_symbol=slope_symbol,
         intercept_symbol=intercept_symbol,
         global_sig_figs=global_sig_figs,
+        functional_notation=functional_notation,
         _reg_precomputed=reg,
     )
 
@@ -1827,8 +2365,17 @@ def generate_bilan_regression(
     slope_symbol: str = r"\theta_1",
     intercept_symbol: str = r"\theta_0",
     global_sig_figs: int = 3,
+    functional_notation: bool = False,
     _reg_precomputed: dict = None,
 ) -> str:
+    """
+    `functional_notation` : si True, le membre de gauche du résultat encadré
+    final s'écrit "{y_symbol}({x_symbol})" au lieu de "{y_symbol}" seul —
+    utile quand y_symbol désigne une grandeur explicitement fonction de
+    x_symbol (ex : V_0(\\nu) plutôt que V_0 pour l'effet photoélectrique).
+    N'affecte que la ligne \\boxed{} finale ; la phrase d'introduction
+    ("On cherche les paramètres de la droite ...") reste inchangée.
+    """
     reg   = _reg_precomputed if _reg_precomputed is not None else linear_regression(x_data, y_data)
     lines = []
 
@@ -1838,7 +2385,7 @@ def generate_bilan_regression(
     lines.append(rf"\subsection{{Bilan --- {_escape_latex(subsection_title)}}}")
     lines.append("")
     lines.append(
-        rf"On cherche les paramètres de la droite "
+        rf"\noindent On cherche les paramètres de la droite "
         rf"${y_symbol} = {intercept_symbol} + {slope_symbol} \cdot {x_symbol}$ :"
     )
     lines.append(r"\[")
@@ -1850,7 +2397,7 @@ def generate_bilan_regression(
     lines.append("")
 
     N = reg["N"]
-    lines.append(rf"Avec $N = {N}$ points de mesure, les estimateurs sont :")
+    lines.append(rf"\noindent Avec $N = {N}$ points de mesure, les estimateurs sont :")
     lines.append(r"\[")
     lines.append(rf"    {slope_symbol} = {_si(reg['theta1'], s_unit, sig=global_sig_figs)}")
     lines.append(r"\]")
@@ -1859,7 +2406,7 @@ def generate_bilan_regression(
     lines.append(r"\]")
     lines.append("")
     lines.append(
-        rf"Les incertitudes-types associées "
+        rf"\noindent Les incertitudes-types associées "
         rf"($s^2_{{\mathrm{{res}}}} = {_sci(reg['s_res']**2, sig=global_sig_figs)}$) sont :"
     )
     lines.append(r"\[")
@@ -1870,11 +2417,11 @@ def generate_bilan_regression(
     lines.append(r"\]")
     lines.append("")
     lines.append(
-        rf"Le coefficient de corrélation vaut $r^2 = \num{{{reg['r2']:.4f}}}$."
+        rf"\noindent Le coefficient de corrélation vaut $r^2 = \num{{{reg['r2']:.4f}}}$."
     )
     lines.append(r"\newline")
     lines.append("")
-    lines.append(r"Le résultat de la régression s'écrit :")
+    lines.append(r"\noindent Le résultat de la régression s'écrit :")
 
     # On réutilise format_result (Partie 1) puis _format_result_uncertainty
     # (Partie 2) pour appliquer la même règle métrologique (le nombre de
@@ -1893,17 +2440,20 @@ def generate_bilan_regression(
 
     intercept_term = rf"\left({intercept_expr}\right)"
     slope_term     = rf"\left({slope_expr}\right)"
-    box_inline = rf"{y_symbol} = {intercept_term} + {slope_term} \cdot {x_symbol}"
+    # Notation fonctionnelle réservée au \boxed{} final (cf. docstring) :
+    # la phrase d'introduction plus haut continue d'utiliser y_symbol seul.
+    y_label = rf"{y_symbol}({x_symbol})" if functional_notation else y_symbol
+    box_inline = rf"{y_label} = {intercept_term} + {slope_term} \cdot {x_symbol}"
 
     lines.append(r"\[")
-    if len(box_inline) > _INLINE_MAX_CHARS:
+    if _visual_length(box_inline) > _INLINE_MAX_CHARS:
         # Fallback multi-ligne : un \boxed{} ne peut contenir qu'une seule
         # ligne de display math nativement ; on imbrique un environnement
         # `array` pour conserver l'encadrement sur un résultat trop long
         # (cas fréquent dès que les unités composées entrent en jeu).
         lines.append(r"    \boxed{")
         lines.append(r"    \begin{array}{c}")
-        lines.append(rf"    {y_symbol} = {intercept_term} \\[4pt]")
+        lines.append(rf"    {y_label} = {intercept_term} \\[4pt]")
         lines.append(rf"    {{}} + {slope_term} \cdot {x_symbol}")
         lines.append(r"    \end{array}")
         lines.append(r"    }")
@@ -1914,6 +2464,181 @@ def generate_bilan_regression(
     return "\n".join(lines)
 
 
+def generate_bilan_nonlinear_regression(
+    x_symbol: str,
+    y_symbol: str,
+    x_unit: str,
+    y_unit: str,
+    x_data: list[float],
+    y_data: list[float],
+    model_func,
+    p0: list[float],
+    param_names: list[str],
+    param_symbols: dict[str, str],
+    param_units: dict[str, str],
+    model_latex: str,
+    subsection_title: str = "Régression non linéaire",
+    global_sig_figs: int = 3,
+    functional_notation: bool = False,
+    sigma: list[float] = None,
+    _reg_precomputed: dict = None,
+) -> str:
+    r"""
+    Analogue non affine de `generate_bilan_regression`. Réutilise telle
+    quelle la logique de mise en forme (`format_result`,
+    `_format_result_uncertainty`, alignement des chiffres significatifs,
+    fallback `\begin{array}` si la ligne encadrée est trop longue) — c'est
+    un copier-adapter de `generate_bilan_regression`, pas une réécriture
+    (cf. feuille de route nonlinear_regression, §2.2).
+
+    Contrairement au cas affine, où la formule du modèle
+    ($y = \theta_0 + \theta_1 x$) est connue à l'avance et donc générée
+    automatiquement, un modèle arbitraire ne peut pas être déduit de
+    `model_func` par introspection (fragile, difficile à déboguer en
+    pleine rédaction de CR) : l'appelant doit fournir lui-même
+    `model_latex`, un gabarit LaTeX portant un `{}` positionnel pour
+    CHAQUE paramètre de `param_names`, dans le MÊME ordre. Ce gabarit est
+    rempli une première fois avec les symboles (pour l'équation du
+    modèle), une seconde fois avec les termes encadrés valeur ±
+    incertitude (pour le résultat final \boxed{}).
+
+    Exemple — décharge RC, $V(t) = V_0 \exp(-t/\tau)$ :
+        model_latex = r"{} \exp\left(-t/{}\right)"
+        param_names = ["V0", "tau"]
+        param_symbols = {"V0": "V_0", "tau": r"\tau"}
+
+    `_reg_precomputed` accepte le dict déjà renvoyé par un appel antérieur
+    à `nonlinear_regression` sur les mêmes arguments, pour éviter de
+    relancer curve_fit une seconde fois (même logique que
+    `_reg_precomputed` dans `generate_bilan_regression`).
+
+    Comme dans `generate_bilan_regression`, le \boxed{} final affiche
+    directement l'incertitude-type u_params (jamais une incertitude
+    élargie k·u) : c'est la même convention que pour theta0/theta1, la
+    grandeur destinée à être encadrée « sérieusement » (k de
+    Welch-Satterthwaite) est celle du mesurande final qui consomme ces
+    paramètres via `full_gum_analysis`/`generate_bilan`, pas le paramètre
+    de régression lui-même.
+    """
+    reg = _reg_precomputed if _reg_precomputed is not None else nonlinear_regression(
+        x_data, y_data, model_func, p0, param_names, sigma=sigma,
+    )
+
+    n_placeholders = model_latex.count("{}")
+    if n_placeholders != len(param_names):
+        raise ValueError(
+            f"generate_bilan_nonlinear_regression : model_latex contient "
+            f"{n_placeholders} placeholder(s) '{{}}' mais param_names en "
+            f"compte {len(param_names)}. Il faut exactement un '{{}}' par "
+            "paramètre, dans le même ordre que param_names."
+        )
+
+    sym_map  = {n: param_symbols.get(n, n) for n in param_names}
+    unit_map = {n: param_units.get(n, "")  for n in param_names}
+    lines    = []
+
+    lines.append(rf"\subsection{{Bilan --- {_escape_latex(subsection_title)}}}")
+    lines.append("")
+
+    symbols_list   = [sym_map[n] for n in param_names]
+    model_symbolic = model_latex.format(*symbols_list)
+    y_label_intro  = rf"{y_symbol}({x_symbol})" if functional_notation else y_symbol
+    lines.append(
+        rf"\noindent On cherche les paramètres du modèle "
+        rf"${y_label_intro} = {model_symbolic}$ par ajustement non linéaire "
+        rf"(moindres carrés, \texttt{{scipy.optimize.curve\_fit}}) :"
+    )
+    lines.append("")
+
+    N = reg["N"]
+    p = len(param_names)
+    lines.append(
+        rf"\noindent Avec $N = {N}$ points de mesure et $p = {p}$ "
+        rf"paramètres libres ($\nu = {reg['nu']}$), les estimateurs sont :"
+    )
+
+    est_terms = [
+        rf"{sym_map[n]} = {_si(reg['params'][n], unit_map[n], sig=global_sig_figs)}"
+        for n in param_names
+    ]
+    est_line = r"\qquad ".join(est_terms)
+    if len(est_terms) > _ALIGN_MAX_TERMS or len(est_line) > _ALIGN_MAX_CHARS:
+        lines.append(r"\begin{align*}")
+        for i, term in enumerate(est_terms):
+            suffix = r" \\" if i < len(est_terms) - 1 else ""
+            lines.append(rf"    {term.replace(' = ', ' &= ', 1)}{suffix}")
+        lines.append(r"\end{align*}")
+    else:
+        lines.append(r"\[")
+        lines.append(r"    " + est_line)
+        lines.append(r"\]")
+    lines.append("")
+
+    unc_terms = [
+        rf"u({sym_map[n]}) = {_si(reg['u_params'][n], unit_map[n], sig=2)}"
+        for n in param_names
+    ]
+    unc_line = r"\qquad ".join(unc_terms)
+    lines.append(r"\noindent Les incertitudes-types associées sont :")
+    if len(unc_terms) > _ALIGN_MAX_TERMS or len(unc_line) > _ALIGN_MAX_CHARS:
+        lines.append(r"\begin{align*}")
+        for i, term in enumerate(unc_terms):
+            suffix = r" \\" if i < len(unc_terms) - 1 else ""
+            lines.append(rf"    {term.replace(' = ', ' &= ', 1)}{suffix}")
+        lines.append(r"\end{align*}")
+    else:
+        lines.append(r"\[")
+        lines.append(r"    " + unc_line)
+        lines.append(r"\]")
+    lines.append("")
+
+    lines.append(
+        rf"\noindent Le coefficient de détermination vaut $r^2 = \num{{{reg['r2']:.4f}}}$."
+    )
+    lines.append(r"\newline")
+    lines.append("")
+    lines.append(r"\noindent Le résultat de l'ajustement s'écrit :")
+
+    # Même logique que generate_bilan_regression : format_result puis
+    # _format_result_uncertainty appliquent la règle métrologique (2 c.s.
+    # sur l'incertitude pilotent le nombre de décimales du résultat) et le
+    # rendu siunitx autosuffisant, plutôt qu'un \pm reconstruit à la main.
+    boxed_terms = []
+    for n in param_names:
+        fmt_n = format_result(
+            reg["params"][n], reg["u_params"][n], sig_figs_exact=global_sig_figs
+        )
+        expr = _format_result_uncertainty(
+            fmt_n["result"], fmt_n["U"], unit_map[n], sig_figs_exact=global_sig_figs
+        )
+        boxed_terms.append(rf"\left({expr}\right)")
+
+    model_boxed = model_latex.format(*boxed_terms)
+    y_label     = rf"{y_symbol}({x_symbol})" if functional_notation else y_symbol
+    box_inline  = rf"{y_label} = {model_boxed}"
+
+    lines.append(r"\[")
+    if _visual_length(box_inline) > _INLINE_MAX_CHARS:
+        # Même fallback multi-ligne que generate_bilan_regression : un
+        # \boxed{} en display math ne tient nativement qu'une seule ligne.
+        lines.append(r"    \boxed{")
+        lines.append(r"    \begin{array}{c}")
+        lines.append(rf"    {y_label} \\[4pt]")
+        lines.append(rf"    {{}} = {model_boxed}")
+        lines.append(r"    \end{array}")
+        lines.append(r"    }")
+    else:
+        lines.append(rf"    \boxed{{{box_inline}}}")
+    lines.append(r"\]")
+
+    return "\n".join(lines)
+
+
 def generate_annexe(bilans: list[str]) -> str:
-    body = "\n\n".join(bilans)
-    return r"\section{Annexe : Bilans d'incertitudes}" + "\n\n" + body
+    """
+    Concatène les bilans (`generate_bilan`, `generate_bilan_regression`, ...)
+    séparés par une ligne blanche, sans titre de section : le template de
+    l'utilisateur porte déjà son propre `\\section{Annexe : Bilans
+    d'incertitudes}`, générer ce titre ici le dupliquait à chaque export.
+    """
+    return "\n\n".join(bilans)
