@@ -28,6 +28,23 @@ pip install matplotlib
 
 Aucune autre dépendance. Fonctionne avec Python 3.10+ (utilisation de `list[float]` en annotation de type).
 
+---
+
+## Structure du projet
+
+```
+gum-calc/
+├── gum_calc.py               # Moteur de calcul et export LaTeX
+├── plot_courbes.py           # Tracé et export PDF des courbes (basé sur gum_calc, ne recalcule rien)
+├── gum_notebook.skill        # Skill Claude : génère automatiquement le notebook ci-dessous
+├── gum_uncertainties.ipynb   # Notebook modèle, une cellule par mesurande
+└── README.md
+```
+
+`gum_notebook.skill` est un [Claude Skill](https://www.anthropic.com) : un ensemble d'instructions qui permet à Claude de générer automatiquement `gum_uncertainties.ipynb` pour un nouveau TP, câblé sur `gum_calc.py`, plutôt que de dupliquer et remplir le modèle à la main pour chaque compte rendu.
+
+---
+
 ## Usage rapide
 
 ```python
@@ -115,7 +132,7 @@ bilan = generate_bilan_nonlinear_regression(
 
 ### Tracé de courbes
 
-`plot_courbes.py` trace et exporte en PDF vectoriel les résultats de `gum_calc.py`, sans rien recalculer : nuage de points avec barres d'erreur, droite ou courbe ajustée, bande d'incertitude autour de l'ajustement, résidus, séries multiples.
+`plot_courbes.py` trace et exporte en PDF les résultats de `gum_calc.py`, sans rien recalculer : nuage de points avec barres d'erreur, droite ou courbe ajustée, bande d'incertitude autour de l'ajustement, résidus, séries multiples.
 
 ```python
 from plot_courbes import plot_regression, plot_nonlinear_regression, export_figure
@@ -128,21 +145,6 @@ export_figure(fig, "decharge_RC")   # -> figures/decharge_RC.pdf
 ```
 
 `plot_regression` (cas affine) et `plot_nonlinear_regression` (cas non affine, bande d'incertitude propagée par différences finies) sont deux fonctions sœurs indépendantes, chacune dédiée à son cas.
-
----
-
-## Structure du projet
-
-```
-gum-calc/
-├── gum_calc.py               # Moteur de calcul et export LaTeX
-├── plot_courbes.py           # Tracé et export PDF des courbes (lit gum_calc, ne recalcule rien)
-├── gum_notebook.skill        # Skill Claude : génère automatiquement le notebook ci-dessous
-├── gum_uncertainties.ipynb   # Notebook modèle, une cellule par mesurande
-└── README.md
-```
-
-`gum_notebook.skill` est un [Claude Skill](https://www.anthropic.com) : un ensemble d'instructions qui permet à Claude de générer automatiquement `gum_uncertainties.ipynb` pour un nouveau TP, câblé sur `gum_calc.py`, plutôt que de dupliquer et remplir le modèle à la main pour chaque compte rendu.
 
 ---
 
@@ -183,7 +185,7 @@ J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cou
 - **Pas de régression linéaire pondérée.** `linear_regression` suppose que chaque point de mesure porte la même incertitude sur y. `nonlinear_regression`, plus récente, accepte en revanche un paramètre `sigma` optionnel pour pondérer l'ajustement par une incertitude connue point par point.
 - **Algèbre des unités symbolique, pas numérique.** Le moteur traite les noms d'unités comme des tokens : il ne simplifie pas automatiquement `\kilo\gram` face à `\gram`, mélanger les préfixes produit un résultat non simplifié mais pas incorrect.
 
-Une extension naturelle serait une suite de tests comparant la sortie du moteur à des exemples du GUM vérifiés à la main, pour détecter automatiquement les régressions au fil de l'évolution du code — à ce jour, chaque nouvelle fonctionnalité est vérifiée manuellement (cas connu comparé à un calcul de référence, relecture du LaTeX généré dans Overleaf) plutôt que par une suite de tests persistée dans le dépôt.
+Une extension serait une suite de tests comparant la sortie du moteur à des exemples du GUM vérifiés à la main, pour détecter automatiquement les régressions au fil de l'évolution du code — à ce jour, chaque nouvelle fonctionnalité est vérifiée manuellement (cas connu comparé à un calcul de référence, relecture du LaTeX généré dans Overleaf) plutôt que par une suite de tests persistée dans le dépôt.
 
 ---
 
