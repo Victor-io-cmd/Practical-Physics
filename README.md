@@ -45,6 +45,14 @@ gum-calc/
 
 ---
 
+## Architecture et démarche
+
+Le code est séparé en deux parties distinctent : une partie de calcul et une partie de formatage LaTeX, se contentant de réutiliser les résultats que la structure de calcul a déjà produits.
+
+J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cours de métrologie de L2 Physique à l'UPEC, puis j'ai travaillé avec [Claude (Anthropic)](https://www.anthropic.com) pour traduire cette logique en Python : le moteur de propagation SymPy, la mise en forme LaTeX, et la régression.
+
+---
+
 ## Usage rapide
 
 ```python
@@ -167,14 +175,6 @@ export_figure(fig, "decharge_RC")   # -> figures/decharge_RC.pdf
 **Génération LaTeX.** Rédactions complètes utilisant le package `siunitx` : le modèle de mesure, une description de chaque source d'incertitude, les coefficients de sensibilité, l'étape de Welch-Satterthwaite quand elle est pertinente, le bilan d'incertitude, et le résultat final encadré. Plusieurs rédactions peuvent être assemblées en une seule annexe.
 
 **Tracé de courbes.** `plot_courbes.py` lit les dicts produits par `gum_calc.py` sans rien recalculer : nuage de points avec barres d'erreur, régression affine ou non affine superposée, bande d'incertitude autour de l'ajustement (propagation analytique pour le cas affine, par différences finies pour le cas non affine), résidus, séries multiples sur les mêmes axes, export direct en PDF vectoriel pour Overleaf.
-
----
-
-## Architecture et démarche
-
-Le code est délibérément séparé en deux parties qui ne se mélangent jamais : une partie de calcul qui ne connaît rien au LaTeX, et une partie de formatage qui n'exécute aucune physique, se contentant de réutiliser des résultats que la couche de calcul a déjà produits.
-
-J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cours de métrologie de L2 Physique à l'UPEC, puis j'ai travaillé avec [Claude (Anthropic)](https://www.anthropic.com) pour traduire cette logique en Python : le moteur de propagation SymPy, la mise en forme LaTeX, le pipeline de régression. Comprendre le GUM assez bien pour vérifier chaque résultat a compté davantage que l'écriture du code elle-même — une IA peut produire du code correct autour d'une idée fausse aussi facilement qu'autour d'une idée juste.
 
 ---
 
