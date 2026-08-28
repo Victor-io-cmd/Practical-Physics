@@ -6,11 +6,11 @@ Un moteur de calcul qui transforme des mesures brutes de TP en une analyse d'inc
 
 ## Le principe
 
-En physique expérimentale, chaque mesure s'accompagne d'une incertitude, et chaque compte rendu de TP nécessite une section rigoureuse expliquant d'où vient cette incertitude et comment elle se propage jusqu'au résultat final. Cette démarche suit une norme internationale, le **GUM** (Guide pour l'expression de l'incertitude de mesure), et la réaliser à la main pour chaque grandeur d'un compte rendu est lent, répétitif et source d'erreurs.
+En physique expérimentale, chaque mesure s'accompagne d'une incertitude, et chaque compte rendu de TP nécessite une section rigoureuse expliquant d'où vient cette incertitude et comment elle se propage jusqu'au résultat final. Cette démarche suit une norme internationale, le **GUM** (Guide to the Expression of Uncertainty in Measurement), et la réaliser à la main pour chaque grandeur est lent, répétitif et source d'erreurs.
 
-`gum-calc` automatise l'ensemble de cette chaîne de traitement. On lui fournit une formule, des valeurs mesurées, et la façon dont chaque valeur a été obtenue, et il renvoie le résultat propagé accompagné d'une rédaction LaTeX prête à l'emploi : le modèle de mesure, les coefficients de sensibilité, le bilan d'incertitude, et le résultat final correctement arrondi.
+`gum-calc` automatise l'ensemble de cette chaîne de traitement. On lui fournit une formule, des valeurs mesurées, et la façon dont chaque valeur a été obtenue. Il renvoie le résultat propagé accompagné d'une rédaction LaTeX prête à l'emploi : le modèle de mesure, les coefficients de sensibilité, le bilan d'incertitude, et le résultat final correctement arrondi.
 
-Développé pour mes propres comptes rendus de TP en tant qu'étudiant en L3 Physique à l'UPEC (Université Paris-Est Créteil). La sortie LaTeX générée est en français, puisqu'elle est directement destinée à des comptes rendus rédigés en français.
+Développé pour mes propres comptes rendus de TP en tant qu'étudiant en L3 Physique à l'UPEC (Université Paris-Est Créteil).
 
 ---
 
@@ -97,6 +97,14 @@ bilan = generate_bilan(
 
 Pour un TP complet avec plusieurs mesurandes, utiliser directement `gum_uncertainties.ipynb` : une cellule par grandeur, le tout assemblé en annexe par `generate_annexe()` en fin de notebook.
 
+## Exemple
+
+Bilan généré par `generate_bilan` pour un exercice de TD de métrologie (L3 Physique, UPEC) : détermination du coefficient de Lamé $\lambda = \dfrac{2\mu\sigma}{1-2\sigma}$ à partir du module de cisaillement $\mu$ et du coefficient de Poisson $\sigma$, chacun mesuré sur 6 essais.
+
+![Exemple de bilan GUM généré par generate_bilan](assets/verified_bilan_example.png)
+
+Rendu directement depuis la sortie de `generate_bilan`, sans retouche manuelle : modèle de mesure, incertitudes de type A sur $\mu$ et $\sigma$, coefficients de sensibilité, composition quadratique, degrés de liberté effectifs (Welch-Satterthwaite), budget d'incertitude, et résultat final encadré.
+
 ### Comparaison à une valeur théorique
 
 Question différente de `generate_bilan` (« quelle est l'incertitude ? ») : « ce résultat est-il compatible avec une valeur théorique de référence ? ». Comparaison par variable de Student réduite, avec le risque associé lu dans la loi de Student (ou normale si $\nu_{\text{eff}} \to \infty$) :
@@ -178,7 +186,7 @@ export_figure(fig, "decharge_RC")   # -> figures/decharge_RC.pdf
 
 **Génération LaTeX** (`gum_export.py`). Rédactions complètes utilisant le package `siunitx` : le modèle de mesure, une description de chaque source d'incertitude, les coefficients de sensibilité, l'étape de Welch-Satterthwaite quand elle est pertinente, le bilan d'incertitude, et le résultat final encadré. Plusieurs rédactions peuvent être assemblées en une seule annexe.
 
-**Tracé de courbes.** `plot_courbes.py` lit les dicts produits par `gum_calc.py` sans rien recalculer : nuage de points avec barres d'erreur, régression affine ou non affine superposée, bande d'incertitude autour de l'ajustement (propagation analytique pour le cas affine, par différences finies pour le cas non affine), résidus, séries multiples sur les mêmes axes, export direct en PDF vectoriel pour Overleaf.
+**Tracé de courbes.** `plot_courbes.py` lit les dicts produits par `gum_calc.py` sans rien recalculer : nuage de points avec barres d'erreur, régression affine ou non affine superposée, bande d'incertitude autour de l'ajustement (propagation analytique pour le cas affine, par différences finies pour le cas non affine), résidus, séries multiples sur les mêmes axes, export direct en PDF.
 
 ---
 
