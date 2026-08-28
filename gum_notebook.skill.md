@@ -3,8 +3,9 @@ name: gum-notebook
 description: >
   Génère un notebook Jupyter GUM complet pour les comptes rendus de TP L3 Physique.
   S'active sur "mode incertitudes". Produit un .ipynb prêt à tourner, câblé sur
-  gum_calc.py, avec une cellule par mesurande, régression affine ou non linéaire
-  (exponentielle, sinusoïde...), et l'export LaTeX final.
+  gum_calc.py (moteur de calcul) et gum_export.py (rédaction LaTeX), avec une
+  cellule par mesurande, régression affine ou non linéaire (exponentielle,
+  sinusoïde...), et l'export LaTeX final.
 triggers:
   - "mode incertitudes"
   - "calcule les incertitudes"
@@ -31,12 +32,22 @@ Résultat livré : un fichier `.ipynb` complet, nommé `GUM_<sujet_TP>.ipynb`, p
 
 ## 2. ARCHITECTURE DU MOTEUR
 
-Le moteur de calcul est `gum_calc.py`. Il ne doit **jamais** être réécrit ni simulé dans le notebook.
-Toute la logique de calcul passe par ses fonctions publiques. Ce skill génère **uniquement** le notebook qui les appelle.
+Le moteur repose sur **deux modules distincts**, ni l'un ni l'autre ne doit jamais être réécrit ni simulé dans le notebook. Toute la logique passe par leurs fonctions publiques ; ce skill génère **uniquement** le notebook qui les appelle.
+
+| Module | Rôle | Contenu |
+|---|---|---|
+| `gum_calc.py` | Moteur de calcul pur | sources d'incertitude, propagation GUM, Welch-Satterthwaite, régressions linéaire/non linéaire, test de compatibilité, arrondi métrologique. Ne produit **aucune** chaîne LaTeX. |
+| `gum_export.py` | Rédaction LaTeX | met en forme, en siunitx, les résultats déjà calculés par `gum_calc.py` (qu'il importe). `gum_calc.py` ne dépend jamais de `gum_export.py`. |
+
+**Conséquence directe pour le notebook généré** : l'import se fait en **deux blocs séparés**, un par module (voir Cellule HEADER, §4) — jamais un seul `from gum_calc import (...)` regroupant les fonctions des deux fichiers. Le `sys.path.insert` reste unique (les deux fichiers vivent dans le même dossier), mais les fonctions de rédaction LaTeX (`generate_bilan*`, `generate_annexe`, `full_pipeline_regression_to_measurand`) s'importent depuis `gum_export`, jamais depuis `gum_calc`.
 
 ### Fonctions disponibles et signatures exactes
 
 ```python
+# ============================================================
+# gum_calc.py — MOTEUR DE CALCUL (aucune fonction ne renvoie de LaTeX)
+# ============================================================
+
 # --- Sources d'incertitude ---
 
 uncertainty_type_A(values: list[float]) -> UncertaintyInput
@@ -70,11 +81,48 @@ full_gum_analysis(
     nominal_values: dict,       # {nom: valeur float}
     uncertainty_inputs: dict,   # {nom: dict uncertainty_type_*}
     k_override: float = None,   # force k si fourni, sinon Welch-Satterthwaite auto
+    covariances: dict[tuple[str, str], float] = None,  # {(nom_i,nom_j): u(x_i,x_j)}, GUM §5.2 formule 13
 ) -> dict
-# Retourne : result, uc, uc_squared, sensitivities, contributions, budget,
-#            partial_derivs, nu_eff, k, U, result_rounded, U_rounded, decimals
+# Retourne : result, uc, uc_squared, sensitivities, contributions,
+#            covariance_terms, budget, partial_derivs, nu_eff, k, U,
+#            result_rounded, U_rounded, decimals
 
-# --- Export LaTeX ---
+# --- Régressions (linéaire ET non linéaire) ---
+
+linear_regression(x_data: list[float], y_data: list[float]) -> dict
+# Modèle y = theta0 + theta1 * x, moindres carrés ordinaires. N >= 3.
+# Retourne : theta0, theta1, u_theta0, u_theta1, cov_theta01
+#            (= Cov(theta0,theta1), covariance OLS analytique), s_res,
+#            r2, N, nu (= N-2), y_pred, residuals
+
+nonlinear_regression(
+    x_data: list[float],
+    y_data: list[float],
+    model_func,                 # callable(x, *params) -> y — OPÉRATIONS NUMPY
+                                 # UNIQUEMENT (np.exp, np.sin...), jamais math.*
+    p0: list[float],            # estimation initiale, même ordre que param_names
+    param_names: list[str],     # ex: ["V0", "tau"]
+    sigma: list[float] = None,  # incertitude sur y point par point (optionnel)
+) -> dict
+# Retourne : params (dict {nom: valeur}), u_params (dict {nom: incertitude-type}),
+#            cov (matrice pcov complète, ordre de param_names), nu (= N - p),
+#            N, residuals, y_pred, r2, model_func, param_names
+
+# --- Test de compatibilité théorie/mesure (calcul pur, pas de LaTeX) ---
+
+compatibility_test(
+    y_mesure: float,      # valeur mesurée : res["result"] ou reg["theta0"/"theta1"]
+    y_theorique: float,   # valeur théorique de référence, supposée exacte
+    uc: float,            # res["uc"] (mesurande direct) ou reg["u_theta0"/"u_theta1"]
+    nu_eff: float,        # res["nu_eff"] (mesurande direct) ou reg["nu"] (régression)
+) -> dict
+# Retourne s, ecart_abs, t_stat, nu_eff, risk (%), compatible (bool).
+# Se contente de comparer un couple (uc, nu_eff) déjà produit ailleurs
+# à une valeur théorique — aucun recalcul de propagation ici.
+
+# ============================================================
+# gum_export.py — RÉDACTION LATEX (importe gum_calc, jamais l'inverse)
+# ============================================================
 
 generate_bilan(
     measurand_name: str,        # nom en toutes lettres, ex: "Résistance"
@@ -89,6 +137,8 @@ generate_bilan(
     k_override: float = None,
     subsection: bool = True,
     global_sig_figs: int = 3,
+    covariances: dict[tuple[str, str], float] = None,  # transmis tel quel à full_gum_analysis
+    _res_precomputed = None,    # réutilise un full_gum_analysis déjà calculé — voir §4
 ) -> str  # bloc LaTeX complet
 
 generate_bilan_regression(
@@ -100,6 +150,9 @@ generate_bilan_regression(
     intercept_unit: str = "",
     slope_symbol: str = r"\theta_1",
     intercept_symbol: str = r"\theta_0",
+    global_sig_figs: int = 3,
+    functional_notation: bool = False,
+    _reg_precomputed: dict = None,
 ) -> str
 
 full_pipeline_regression_to_measurand(
@@ -110,25 +163,14 @@ full_pipeline_regression_to_measurand(
     variable_symbols, variable_units,
     nominal_values_helpers,     # valeurs des variables hors régression
     uncertainty_inputs_helpers, # incertitudes des variables hors régression
-    measurand_symbol, measurand_unit,
-    slope_unit, intercept_unit,
-    slope_symbol, intercept_symbol,
-) -> str  # LaTeX régression + GUM en un seul appel
-
-# --- Régression non linéaire (voir 3.4quater) ---
-
-nonlinear_regression(
-    x_data: list[float],
-    y_data: list[float],
-    model_func,                 # callable(x, *params) -> y — OPÉRATIONS NUMPY
-                                 # UNIQUEMENT (np.exp, np.sin...), jamais math.*
-    p0: list[float],            # estimation initiale, même ordre que param_names
-    param_names: list[str],     # ex: ["V0", "tau"]
-    sigma: list[float] = None,  # incertitude sur y point par point (optionnel)
-) -> dict
-# Retourne : params (dict {nom: valeur}), u_params (dict {nom: incertitude-type}),
-#            cov (matrice pcov complète, ordre de param_names), nu (= N - p),
-#            N, residuals, y_pred, r2, model_func, param_names
+    measurand_symbol, measurand_name="", measurand_unit="",
+    slope_unit="", intercept_unit="",
+    slope_symbol=r"\theta_1", intercept_symbol=r"\theta_0",
+    global_sig_figs: int = 3,
+    couple_theta0: bool = False,
+    couple_theta1: bool = False,
+    functional_notation: bool = False,
+) -> str  # LaTeX régression + GUM en un seul appel — voir 3.4ter-a
 
 generate_bilan_nonlinear_regression(
     x_symbol: str, y_symbol: str,
@@ -147,18 +189,7 @@ generate_bilan_nonlinear_regression(
 
 generate_annexe(bilans: list[str]) -> str
 # Assemble tous les bilans dans \section{Annexe : Bilans d'incertitudes}
-
-# --- Partie 2c : Test de compatibilité théorie/mesure ---
-
-compatibility_test(
-    y_mesure: float,      # valeur mesurée : res["result"] ou reg["theta0"/"theta1"]
-    y_theorique: float,   # valeur théorique de référence, supposée exacte
-    uc: float,            # res["uc"] (mesurande direct) ou reg["u_theta0"/"u_theta1"]
-    nu_eff: float,        # res["nu_eff"] (mesurande direct) ou reg["nu"] (régression)
-) -> dict
-# Retourne s, ecart_abs, t_stat, nu_eff, risk (%), compatible (bool).
-# Ne recalcule rien de gum_calc : se contente de comparer un couple
-# (uc, nu_eff) déjà produit ailleurs à une valeur théorique.
+# (le titre de section n'est pas généré ici, le template le porte déjà).
 
 generate_bilan_compatibilite(
     measurand_symbol: str,      # symbole LaTeX, ex: "R" ou r"\theta_1"
@@ -171,7 +202,11 @@ generate_bilan_compatibilite(
     subsection: bool = False,
     subsection_title: str = "Confrontation à la valeur théorique",
     global_sig_figs: int = 3,
-) -> str  # paragraphe LaTeX : écart relatif s, t(nu_eff), risque en %, conclusion
+    k: float = None,             # facteur k déjà connu (mesurande direct) — sinon recalculé via nu_eff
+    U: float = None,             # incertitude élargie déjà connue — sinon U = k * uc
+    annexe_ref: bool = True,     # si True, la phrase d'intro renvoie à l'annexe pour le détail de l'incertitude
+    _compat_precomputed: dict = None,  # réutilise un compatibility_test déjà calculé
+) -> str  # paragraphe LaTeX : rappel de la mesure, écart relatif s, t(nu_eff), risque en %, conclusion
 ```
 
 ---
@@ -475,6 +510,43 @@ res_Y = full_gum_analysis("formule_Y", [...], nominales_Y, incertitudes_Y)
 
 Note : les degrés de liberté de X ne se propagent pas dans Y (nu = inf côté Y). Pour un TP de L3, c'est acceptable.
 
+### 3.5bis Piège n°4 — mesurandes intermédiaires partageant une variable source commune
+
+Le patron 3.5 suppose implicitement que les mesurandes intermédiaires combinés en aval sont **statistiquement indépendants**. Ce n'est pas toujours vrai : si deux mesurandes intermédiaires $M_1$ et $M_2$ sont chacun fonction d'une **même variable d'entrée** $E$ (typique d'un protocole de double pesée par comparaison à un étalon commun, ou de deux mesures partageant un même zéro d'instrument), alors $M_1$ et $M_2$ sont corrélés même si chacun est calculé séparément par `full_gum_analysis`.
+
+Exemple concret : $M_1 = E + Z_1$, $M_2 = E + Z_2$, avec $E$ l'étalon commun et $Z_1$, $Z_2$ des erreurs systématiques indépendantes. Alors $\text{Cov}(M_1, M_2) = \text{Var}(E) = u^2(E) \neq 0$. Traiter $M_1$ et $M_2$ comme deux mesurandes indépendants dans une cellule `M = M1 + M2` ultérieure (patron 3.5 appliqué tel quel) **omet silencieusement** le terme croisé $2\,c_{M_1}c_{M_2}\,u(M_1,M_2)$ de la variance composée de $M$. Le calcul s'exécute sans erreur et donne un résultat d'ordre de grandeur plausible — ce piège ne se détecte donc pas à l'exécution, seulement par relecture du modèle physique.
+
+**Détection obligatoire avant toute cellule MESURANDE aval** : dès qu'un mesurande $Y$ combine plusieurs mesurandes intermédiaires déjà calculés séparément (patron 3.5), lister explicitement les variables d'entrée primitives de chacun et vérifier qu'aucune n'apparaît dans plus d'un intermédiaire. Si une variable est partagée, le patron 3.5 seul est insuffisant.
+
+**Deux solutions, dans cet ordre de préférence :**
+
+1. **Reformuler `formula_str` directement en variables primitives**, en substituant les mesurandes intermédiaires par leur expression complète, de sorte que la variable partagée n'apparaisse qu'une seule fois dans la formule. `full_gum_analysis` dérive alors symboliquement la formule entière et capture nativement la corrélation, sans covariance à déclarer à la main.
+   ```python
+   # Au lieu de M = M1 + M2 avec M1, M2 mesurandes séparés :
+   # rho = 4M / (pi d^2 L) avec M = M1 + M2 = 2E + Z1 + Z2
+   res_rho = full_gum_analysis(
+       formula_str        = "4 * (2*E + Z1 + Z2) / (pi * d**2 * L)",
+       variable_names      = ["E", "Z1", "Z2", "d", "L"],
+       nominal_values      = {...},
+       uncertainty_inputs  = {...},
+   )
+   ```
+   C'est la solution à privilégier chaque fois que la formule reste lisible une fois développée : elle élimine le risque d'oubli et ne nécessite aucun calcul de covariance manuel.
+
+2. **Si la reformulation directe est impraticable** (formule trop lourde, ou mesurandes intermédiaires imposés par la structure du compte rendu), garder les mesurandes séparés et déclarer la covariance explicitement via le paramètre `covariances` de `full_gum_analysis`/`generate_bilan` :
+   ```python
+   res_M = full_gum_analysis(
+       formula_str        = "M1 + M2",
+       variable_names      = ["M1", "M2"],
+       nominal_values      = {"M1": res_M1["result"], "M2": res_M2["result"]},
+       uncertainty_inputs  = {"M1": u_M1_chaine, "M2": u_M2_chaine},
+       covariances         = {("M1", "M2"): u_E_value**2},  # Cov(M1,M2) = Var(E)
+   )
+   ```
+   Cette voie exige de recalculer à la main la covariance entre les deux mesurandes à partir de leur(s) variable(s) source commune(s) — source d'erreur supplémentaire, à réserver aux cas où l'option 1 n'est pas applicable.
+
+**Avant de générer toute cellule combinant des mesurandes intermédiaires (patron 3.5)** : recenser les variables primitives de chaque intermédiaire impliqué et confirmer explicitement leur indépendance mutuelle. Ne jamais supposer l'indépendance par défaut dès qu'un protocole de comparaison à un étalon, une référence, ou un zéro commun est mentionné dans l'énoncé.
+
 ### 3.6 Unités siunitx
 
 Utiliser la syntaxe siunitx dans tous les champs `*_unit` :
@@ -504,24 +576,34 @@ Le notebook suit ce squelette JSON. Adapter le nombre de cellules MESURANDE selo
 # ============================================================
 
 import sys
-sys.path.insert(0, r"C:\Users\<USER>\<CHEMIN_VERS_GUM_CALC>")  # À adapter
+sys.path.insert(0, r"C:\Users\<USER>\<CHEMIN_VERS_GUM_CALC>")  # À adapter — dossier contenant
+                                                                # gum_calc.py ET gum_export.py
 
+# --- gum_calc.py : moteur de calcul pur, aucune fonction ne renvoie de LaTeX ---
 from gum_calc import (
     uncertainty_type_A,
     uncertainty_type_B_from_resolution,
     uncertainty_type_B_uniform,
     uncertainty_type_B_relative,
     uncertainty_type_exact,
+    UncertaintyInput,
     full_gum_analysis,
-    generate_bilan,
-    generate_bilan_regression,
-    generate_annexe,
-    full_pipeline_regression_to_measurand,
-    nonlinear_regression,               # uniquement si le TP a un ajustement non affine
-    generate_bilan_nonlinear_regression,  # uniquement si le TP a un ajustement non affine
+    linear_regression,
+    nonlinear_regression,                 # uniquement si le TP a un ajustement non affine
+    compatibility_test,                   # uniquement si une confrontation théorie/mesure est demandée
 )
 
-print("gum_calc chargé avec succès.")
+# --- gum_export.py : rédaction LaTeX, importe gum_calc en interne ---
+from gum_export import (
+    generate_bilan,
+    generate_bilan_regression,
+    generate_bilan_nonlinear_regression,  # uniquement si le TP a un ajustement non affine
+    generate_bilan_compatibilite,         # uniquement si une confrontation théorie/mesure est demandée
+    generate_annexe,
+    full_pipeline_regression_to_measurand,
+)
+
+print("gum_calc et gum_export chargés avec succès.")
 ```
 
 ### Cellule N — MESURANDE (répéter pour chaque grandeur)
@@ -663,7 +745,7 @@ print(generate_annexe([
 
 À chaque demande de mode incertitudes, procéder dans cet ordre :
 
-1. **Recenser** toutes les grandeurs à calculer et identifier les dépendances (chaînes éventuelles)
+1. **Recenser** toutes les grandeurs à calculer et identifier les dépendances (chaînes éventuelles). **Dès qu'un mesurande combine plusieurs mesurandes intermédiaires (patron 3.5)** : lister les variables primitives de chacun et vérifier qu'aucune n'est partagée (piège 3.5bis — typique d'un protocole de comparaison à un étalon commun). Si une variable est partagée, reformuler `formula_str` en variables primitives (solution 1 de 3.5bis) plutôt que d'empiler des mesurandes intermédiaires indépendants.
 2. **Identifier** pour chaque variable : type de source (A/B résolution/B uniforme/B relative/exact) et valeur numérique
 3. **Identifier** les formules SymPy exactes
 4. **Identifier** les unités siunitx de chaque variable et du mesurande
@@ -671,7 +753,7 @@ print(generate_annexe([
 6. **Si `full_pipeline_regression_to_measurand` est utilisé** : vérifier `"theta1" in variable_names` → `couple_theta1=True`, `"theta0" in variable_names` → `couple_theta0=True` (piège 3.4ter-a), et vérifier par analyse dimensionnelle que l'exposant de $\theta_1$/$\theta_0$ dans `formula_str` correspond au sens réel de la régression $y=\theta_0+\theta_1 x$ (piège 3.4ter-b)
 6bis. **Si une cellule COMPATIBILITÉ suit un `full_pipeline_regression_to_measurand`** : ne jamais attendre `res`/`reg` en retour de cette fonction (elle ne renvoie que le LaTeX, 3.4ter-a-bis) — reconstruire `res` via `linear_regression` puis `full_gum_analysis` en reportant explicitement `nu=reg["nu"]` sur l'incertitude de $\theta_1$/$\theta_0$ (piège 3.4ter-d), et vérifier avant livraison que `U_rounded` de cette cellule coïncide avec l'incertitude élargie du bilan LaTeX de la cellule MESURANDE
 6ter. **Si le TP contient un ajustement non affine** (exponentielle, sinusoïde, loi de puissance...) : ne jamais utiliser `linear_regression`/`generate_bilan_regression` pour ce cas, employer `nonlinear_regression`/`generate_bilan_nonlinear_regression` (3.4quater) — vérifier que `model_func` n'utilise que des opérations numpy, que `p0` est lu sur le nuage de points plutôt que deviné, et que `model_latex` porte exactement un `{}` par paramètre de `param_names`, dans le même ordre
-7. **Générer** le `.ipynb` complet en JSON valide
+7. **Générer** le `.ipynb` complet en JSON valide, avec la cellule HEADER portant deux blocs d'import séparés (`from gum_calc import (...)` puis `from gum_export import (...)`, voir §2 et §4) — jamais un seul bloc regroupant les deux modules
 8. **Avant livraison, si possible, exécuter mentalement ou réellement le notebook** pour confirmer l'absence d'erreur ET la plausibilité physique du résultat (ordre de grandeur cohérent avec le contexte du TP) — une exécution sans erreur ne garantit pas un résultat physiquement correct (piège 3.4ter-b)
 9. **Livrer** le fichier via `present_files`
 
@@ -681,8 +763,10 @@ Si des informations manquent (valeurs numériques, résolutions des instruments)
 
 ## 6. CONTRAINTES ABSOLUES
 
-- Ne jamais recalculer ce que `gum_calc` fait : aucune propagation manuelle dans le notebook
+- Ne jamais recalculer ce que `gum_calc` fait : aucune propagation manuelle dans le notebook. Ne jamais reformuler en prose ce que `gum_export` rédige : aucun bilan LaTeX écrit à la main dans une cellule
+- Ne jamais importer une fonction de rédaction LaTeX (`generate_bilan*`, `generate_annexe`, `full_pipeline_regression_to_measurand`) depuis `gum_calc` : ces fonctions vivent dans `gum_export.py`, qui doit être importé séparément — voir Cellule HEADER, §4
 - Ne jamais passer `res["U"]` comme source dans une chaîne — toujours `res["uc"]`
+- Ne jamais empiler des mesurandes intermédiaires (patron 3.5) sans avoir vérifié qu'ils ne partagent aucune variable source commune — voir piège 3.5bis. Un étalon, une référence, ou un zéro d'instrument commun à deux grandeurs dérivées crée une covariance non nulle entre elles, silencieusement omise si chacune est traitée comme mesurande indépendant
 - Dans tout appel à `full_pipeline_regression_to_measurand`, `couple_theta1=True` et/ou `couple_theta0=True` sont obligatoires dès que `formula_str` référence `theta1`/`theta0` — voir 3.4ter-a
 - Avant d'écrire `formula_str` pour un mesurande dérivé d'une régression, vérifier par analyse dimensionnelle le sens de $\theta_1$ (unité de $y$/unité de $x$, jamais l'inverse) — voir 3.4ter-b
 - `full_pipeline_regression_to_measurand` ne retourne **que** le LaTeX (`-> str`), jamais un tuple `(res, reg, bilan)` — voir 3.4ter-a-bis
