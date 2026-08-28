@@ -97,14 +97,6 @@ bilan = generate_bilan(
 
 Pour un TP complet avec plusieurs mesurandes, utiliser directement `gum_uncertainties.ipynb` : une cellule par grandeur, le tout assemblé en annexe par `generate_annexe()` en fin de notebook.
 
-## Exemple
-
-Bilan généré par `generate_bilan` pour un exercice de TD de métrologie (L3 Physique, UPEC) : détermination du coefficient de Lamé $\lambda = \dfrac{2\mu\sigma}{1-2\sigma}$ à partir du module de cisaillement $\mu$ et du coefficient de Poisson $\sigma$, chacun mesuré sur 6 essais.
-
-![Exemple de bilan GUM généré par generate_bilan](assets/verified_bilan_example.png)
-
-Rendu directement depuis la sortie de `generate_bilan`, sans retouche manuelle : modèle de mesure, incertitudes de type A sur $\mu$ et $\sigma$, coefficients de sensibilité, composition quadratique, degrés de liberté effectifs (Welch-Satterthwaite), budget d'incertitude, et résultat final encadré.
-
 ### Comparaison à une valeur théorique
 
 Question différente de `generate_bilan` (« quelle est l'incertitude ? ») : « ce résultat est-il compatible avec une valeur théorique de référence ? ». Comparaison par variable de Student réduite, avec le risque associé lu dans la loi de Student (ou normale si $\nu_{\text{eff}} \to \infty$) :
