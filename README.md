@@ -1,6 +1,6 @@
 # gum-calc
 
-Un moteur de calcul qui transforme des mesures brutes de TP en une analyse d'incertitude complète et formatée, prête à être collée dans un compte rendu LaTeX.
+Un programme de calcul qui transforme des mesures brutes de TP en une analyse d'incertitude complète et formatée, prête à être utilisée dans un compte rendu LaTeX.
 
 ---
 
@@ -8,9 +8,17 @@ Un moteur de calcul qui transforme des mesures brutes de TP en une analyse d'inc
 
 En physique expérimentale, chaque mesure s'accompagne d'une incertitude, et chaque compte rendu de TP nécessite une section rigoureuse expliquant d'où vient cette incertitude et comment elle se propage jusqu'au résultat final. Cette démarche suit une norme internationale, le **GUM** (Guide to the Expression of Uncertainty in Measurement), et la réaliser à la main pour chaque grandeur est lent, répétitif et source d'erreurs.
 
-`gum-calc` automatise l'ensemble de cette chaîne de traitement. On lui fournit une formule, des valeurs mesurées, et la façon dont chaque valeur a été obtenue. Il renvoie le résultat propagé accompagné d'une rédaction LaTeX prête à l'emploi : le modèle de mesure, les coefficients de sensibilité, le bilan d'incertitude, et le résultat final correctement arrondi.
+`gum-calc` automatise l'ensemble de cette chaîne de traitement. En fournissant une formule, des valeurs mesurées, et la façon dont chaque valeur a été obtenue, il renvoie le résultat propagé accompagné d'une rédaction LaTeX prête à l'emploi.
 
-Développé pour mes propres comptes rendus de TP en tant qu'étudiant en L3 Physique à l'UPEC (Université Paris-Est Créteil).
+Développé pour mes propres comptes rendus de TP en tant qu'étudiant en L3 Physique à l'Université de Paris-Est Créteil (UPEC).
+
+---
+
+## Architecture et démarche
+
+Le code est séparé en deux fichiers distincts : `gum_calc.py`, le moteur de calcul, et `gum_export.py`, le formatage LaTeX, qui se contente de réutiliser les résultats que le moteur a déjà produits.
+
+J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cours de métrologie de L2 Physique à l'UPEC, puis j'ai travaillé avec [Claude (Anthropic)](https://www.anthropic.com) pour traduire cette logique en Python : le moteur de propagation SymPy, la mise en forme LaTeX, et la régression.
 
 ---
 
@@ -45,14 +53,6 @@ gum-calc/
 ```
 
 `gum_notebook.skill` est un [Claude Skill](https://www.anthropic.com) : un ensemble d'instructions qui permet à Claude de générer automatiquement `gum_uncertainties.ipynb` pour un nouveau TP, câblé sur `gum_calc.py` et `gum_export.py`, plutôt que de dupliquer et remplir le modèle à la main pour chaque compte rendu.
-
----
-
-## Architecture et démarche
-
-Le code est séparé en deux fichiers distincts : `gum_calc.py`, le moteur de calcul, et `gum_export.py`, le formatage LaTeX, qui se contente de réutiliser les résultats que le moteur a déjà produits.
-
-J'ai conçu l'architecture et la logique de calcul moi-même, sur la base du cours de métrologie de L2 Physique à l'UPEC, puis j'ai travaillé avec [Claude (Anthropic)](https://www.anthropic.com) pour traduire cette logique en Python : le moteur de propagation SymPy, la mise en forme LaTeX, et la régression.
 
 ---
 
